@@ -151,3 +151,33 @@ The server implementation will use:
 2. Watchdog library for efficient file system monitoring
 3. Asyncio for non-blocking operations and notification delivery
 4. In-memory storage for subscription management
+
+## Local Development
+
+### Setup
+
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management and virtual environment handling.
+
+```bash
+# Install uv if you don't have it already
+curl -sSf https://astral.sh/uv/install.sh | bash
+
+# Create a virtual environment and install dependencies
+uv venv
+uv pip install -e .
+
+# When adding new dependencies
+uv pip install <package>
+```
+
+### Running the Server
+
+```bash
+# Activate the virtual environment (if not using uv's auto-activation)
+source .venv/bin/activate  # On Unix/macOS
+# or
+.venv\Scripts\activate     # On Windows
+
+# Run the server
+python main.py
+```

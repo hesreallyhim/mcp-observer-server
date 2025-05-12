@@ -1,6 +1,8 @@
-def main():
-    print("Hello from mcp-monitor-server!")
+import logging
+import sys
+from pathlib import Path
 
+from mcp_monitor_server import main
 
 if __name__ == "__main__":
     main()

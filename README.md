@@ -1,6 +1,34 @@
 # mcp-monitor-server
 
-`mcp-monitor-server` is an MCP (Model Context Protocol) server that monitors system events, such as file changes, and sends notifications to an MCP client.
+`mcp-monitor-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a bridge between your local file system and AI assistants like Claude, enabling them to respond to file changes automatically.
+
+## Server Description
+
+The MCP Monitor Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved. This server implements the full Model Context Protocol specification, providing:
+
+- **Real-time file monitoring**: Using the Watchdog library for efficient file system observation
+- **Subscription management**: Create, list, and cancel monitoring subscriptions for any path
+- **Change history**: Maintains a log of recent changes for each subscription
+- **File and directory access**: Read file contents and directory listings through MCP resources
+- **Stateless design**: Clients control what happens in response to file changes
+
+### Key Features
+
+- Subscribe to changes in specific files, directories, or entire repositories
+- Filter events by file patterns or event types
+- Query recent changes to see what files were affected
+- Access file contents via resource endpoints
+- Lightweight and efficient implementation with minimal dependencies
+- Simple integration with any MCP-compatible client
+
+### Practical Applications
+
+- **Automated documentation updates**: Keep documentation in sync with code changes
+- **Live reloading**: Trigger rebuilds or restarts when source files change
+- **Collaborative editing**: Track changes made by other editors or team members
+- **Content synchronization**: Mirror file system changes to remote systems
+- **Testing automation**: Run tests when relevant files are modified
+- **AI assistance**: Enable AI tools to respond to file changes automatically
 
 # File Change Monitoring MCP Server Specification
 
@@ -152,32 +180,74 @@ The server implementation will use:
 3. Asyncio for non-blocking operations and notification delivery
 4. In-memory storage for subscription management
 
-## Local Development
+## Installation and Usage
 
 ### Setup
 
 This project uses [uv](https://github.com/astral-sh/uv) for dependency management and virtual environment handling.
 
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/mcp-monitor-server.git
+cd mcp-monitor-server
+
 # Install uv if you don't have it already
 curl -sSf https://astral.sh/uv/install.sh | bash
 
 # Create a virtual environment and install dependencies
 uv venv
 uv pip install -e .
-
-# When adding new dependencies
-uv pip install <package>
 ```
 
 ### Running the Server
 
 ```bash
-# Activate the virtual environment (if not using uv's auto-activation)
-source .venv/bin/activate  # On Unix/macOS
-# or
-.venv\Scripts\activate     # On Windows
-
-# Run the server
+# Option 1: Run directly with Python
 python main.py
+
+# Option 2: Run with command-line options
+python main.py --monitor-path /path/to/monitor --verbose
+
+# Option 3: Run in development mode with MCP CLI
+mcp dev src/mcp_monitor_server/server.py
+
+# Option 4: Install in Claude Desktop
+mcp install src/mcp_monitor_server/server.py --name "File Monitor"
 ```
+
+### Command Line Options
+
+- `--monitor-path`, `-m`: Path to monitor for changes (default: current directory)
+- `--verbose`, `-v`: Increase logging verbosity (can be used multiple times)
+
+### Using with MCP Clients
+
+Here's an example of how a client would interact with the server:
+
+1. Subscribe to a directory:
+   ```
+   subscription_id = call_tool("subscribe", {
+       "path": "/path/to/project",
+       "recursive": True,
+       "patterns": ["*.py", "*.js"]
+   })
+   ```
+
+2. Get recent changes:
+   ```
+   changes = call_tool("get_changes", {
+       "subscription_id": subscription_id
+   })
+   ```
+
+3. Read file contents:
+   ```
+   file_content = read_resource(f"file:///path/to/project/file.py")
+   ```
+
+4. Clean up when done:
+   ```
+   call_tool("unsubscribe", {
+       "subscription_id": subscription_id
+   })
+   ```

@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
 import anyio
 from mcp.server import Server
@@ -1336,9 +1336,12 @@ class FileMonitorMCPServer:
             await self.stop()
 
 
-async def serve() -> None:
+async def serve(monitor_path: Optional[str] = None) -> None:
     """
     Run the server using stdio for communication.
+    
+    Args:
+        monitor_path: Optional path to monitor by default
     """
     server = FileMonitorMCPServer()
     
@@ -1347,6 +1350,17 @@ async def serve() -> None:
     
     # Run the server with context manager to ensure cleanup
     async with server.run():
+        # If monitor_path is provided, create a default subscription
+        if monitor_path:
+            try:
+                # Create a subscription for the monitor path
+                path = str(monitor_path)
+                sub_input = SubscribeInput(path=path, recursive=True)
+                await server._handle_subscribe_tool(sub_input)
+                server.logger.info(f"Created default subscription for path: {path}")
+            except Exception as e:
+                server.logger.error(f"Failed to create default subscription: {e}")
+                
         async with stdio_server() as (read_stream, write_stream):
             await server.server.run(read_stream, write_stream, options)
 

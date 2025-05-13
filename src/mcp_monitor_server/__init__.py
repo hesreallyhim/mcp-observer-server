@@ -44,7 +44,9 @@ def main(monitor_path: Path = Path.cwd(), verbose: int = 0):
 
     # Run the server
     try:
-        asyncio.run(serve(monitor_path))
+        # Convert Path object to string if it's a Path
+        path_str = str(monitor_path) if monitor_path else None
+        asyncio.run(serve(path_str))
     except KeyboardInterrupt:
         logging.info("Server stopped by user")
     except Exception as e:

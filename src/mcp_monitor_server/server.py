@@ -6,21 +6,23 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+# from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, AsyncIterator
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from collections.abc import AsyncIterator
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from pydantic import BaseModel, Field
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+if TYPE_CHECKING:
+    from watchdog.observers import ObserverType
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # MCP server instance
-mcp = FastMCP("MCP Monitor Server")
 
 
 class Subscription(BaseModel):
@@ -48,33 +50,27 @@ class FileChange(BaseModel):
     source_path: Optional[str] = None  # Only for moved events
 
 
-@dataclass
-class MonitorServer:
+class MonitorServer(BaseModel):
     """File monitoring server that watches for file changes."""
     
     # Path to monitor
     base_path: Path
     
     # Observer for watching file system events
-    observer: Observer = None
-    
+    observer: ObserverType
+
     # Mapping of subscription IDs to subscription objects
-    subscriptions: Dict[str, Subscription] = None
-    
+    subscriptions: Dict[str, "Subscription"] = Field(default_factory=dict)
+
     # Map of paths to subscription IDs that are monitoring them
-    path_subscriptions: Dict[str, Set[str]] = None
-    
+    path_subscriptions: Dict[str, Set[str]] = Field(default_factory=dict)
+
     # Store recent changes for each subscription
-    recent_changes: Dict[str, List[FileChange]] = None
+    recent_changes: Dict[str, List["FileChange"]] = Field(default_factory=dict)
     
     # Maximum number of changes to keep per subscription
     max_changes_per_subscription: int = 100
-    
-    def __post_init__(self):
-        self.observer = Observer()
-        self.subscriptions = {}
-        self.path_subscriptions = {}
-        self.recent_changes = {}
+
 
 
 class FileEventHandler(FileSystemEventHandler):
@@ -97,29 +93,29 @@ class FileEventHandler(FileSystemEventHandler):
         if hasattr(event, 'dest_path'):  # Moved event
             event_type = "moved"
             file_change = FileChange(
-                path=event.dest_path,
+                path=str(event.dest_path),
                 event_type=event_type,
                 is_directory=is_directory,
-                source_path=path
+                source_path=str(path)
             )
         elif event.event_type == 'deleted':
             event_type = "deleted"
             file_change = FileChange(
-                path=path,
+                path=str(path),
                 event_type=event_type,
                 is_directory=is_directory
             )
         elif event.event_type == 'created':
             event_type = "created"
             file_change = FileChange(
-                path=path,
+                path=str(path),
                 event_type=event_type,
                 is_directory=is_directory
             )
         elif event.event_type == 'modified':
             event_type = "modified"
             file_change = FileChange(
-                path=path,
+                path=str(path),
                 event_type=event_type,
                 is_directory=is_directory
             )
@@ -195,6 +191,11 @@ async def monitor_lifespan(server: FastMCP) -> AsyncIterator[MonitorServer]:
             _server.observer.join()
         logger.info("Stopped file monitoring")
 
+mcp = FastMCP(
+    name="MCP Monitor Server",
+    monitor_lifespan=monitor_lifespan,
+    stateless_http=True,
+)
 
 # Resources
 
@@ -271,7 +272,7 @@ def get_subscription_info(subscription_id: str) -> str:
 # Tools
 
 @mcp.tool()
-def subscribe(path: str, recursive: bool = False, patterns: List[str] = None, ignore_patterns: List[str] = None, ctx: Context = None) -> str:
+def subscribe(path: str, recursive: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, ctx: Optional[Context] = None) -> str:
     """
     Create a subscription to monitor file changes.
     

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+# from typing import Optional
 
 import click
 
@@ -23,7 +23,7 @@ __version__ = "0.1.0"
     help="Path to monitor for changes",
 )
 @click.option("-v", "--verbose", count=True, help="Increase logging verbosity")
-def main(monitor_path: Optional[Path] = None, verbose: int = 0):
+def main(monitor_path: Path = Path.cwd(), verbose: int = 0):
     """Start the MCP Monitor Server to track file changes and notify clients."""
     # Configure logging based on verbosity level
     log_level = logging.WARNING
@@ -38,9 +38,9 @@ def main(monitor_path: Optional[Path] = None, verbose: int = 0):
         stream=sys.stderr,
     )
 
-    if not monitor_path:
-        monitor_path = Path.cwd()
-        logging.info(f"No path specified, monitoring current directory: {monitor_path}")
+    # if not monitor_path:
+    #     monitor_path = Path.cwd()
+    #     logging.info(f"No path specified, monitoring current directory: {monitor_path}")
 
     # Run the server
     try:

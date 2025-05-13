@@ -6,7 +6,7 @@ import datetime
 import uuid
 from typing import Dict, List, Optional, Set, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FileChange(BaseModel):
@@ -36,8 +36,7 @@ class Subscription(BaseModel):
     changes: List[FileChange] = Field(default_factory=list)
     resource_subscribers: Set[str] = Field(default_factory=set)
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
     def to_dict(self) -> dict:
         """Convert to dictionary representation."""

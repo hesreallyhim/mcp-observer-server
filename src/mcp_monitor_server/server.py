@@ -35,7 +35,7 @@ from mcp.types import (
     TextContent,
     Tool,
 )
-from pydantic import AnyUrl, BaseModel, Field
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field
 from watchdog.events import (
     DirCreatedEvent,
     DirDeletedEvent,
@@ -155,8 +155,7 @@ class Subscription(BaseModel):
         description="Set of client IDs subscribed to receive change notifications"
     )
 
-    class Config:
-        validate_assignment = True
+    model_config = ConfigDict(validate_assignment=True)
 
     def to_dict(self) -> dict:
         """

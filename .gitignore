@@ -9,6 +9,14 @@ wheels/
 # Virtual environments
 .venv
 
+# Cache directories
 .mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
+# Coverage files
+.coverage
+htmlcov/
+
+# Local settings
 **/.claude/settings.local.json

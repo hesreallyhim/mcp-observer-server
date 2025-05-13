@@ -1,18 +1,14 @@
 """Test configuration and fixtures for mcp-monitor-server."""
-import os
 import tempfile
-import asyncio
-from pathlib import Path
-import pytest
-import shutil
 import time
+from pathlib import Path
 from typing import AsyncGenerator, Generator
 
-from mcp_monitor_server.server import (
-    FileMonitorMCPServer,
-    SubscribeInput,
-    FileChange
-)
+import pytest
+import pytest_asyncio
+
+from mcp_monitor_server.server import FileMonitorMCPServer, SubscribeInput
+
 
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
@@ -29,7 +25,7 @@ def test_file(temp_dir: Path) -> Generator[Path, None, None]:
         f.write("Test content")
     yield file_path
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def server() -> AsyncGenerator[FileMonitorMCPServer, None]:
     """Create and initialize an MCP server instance."""
     server = FileMonitorMCPServer()
@@ -37,7 +33,7 @@ async def server() -> AsyncGenerator[FileMonitorMCPServer, None]:
     yield server
     await server.stop()
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def subscription(server: FileMonitorMCPServer, temp_dir: Path) -> AsyncGenerator[str, None]:
     """Create a test subscription."""
     input_data = SubscribeInput(
@@ -72,9 +68,5 @@ def wait_for_file_operation(path: Path, timeout: float = 1.0) -> None:
             break
         time.sleep(0.1)
 
-@pytest.fixture
-def event_loop():
-    """Create an event loop for each test."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# We're removing the custom event_loop fixture and will use the one provided by pytest-asyncio instead
+# To set the scope, we'll update pyproject.toml

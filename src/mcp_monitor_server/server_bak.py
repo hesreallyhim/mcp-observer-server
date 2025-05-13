@@ -2,20 +2,20 @@
 MCP Monitor Server - File monitoring server implementation using Model Context Protocol
 """
 
-import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+
 # from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
-from mcp.server.fastmcp import Context, FastMCP, Image
+from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+
 if TYPE_CHECKING:
     from watchdog.observers import ObserverType
 

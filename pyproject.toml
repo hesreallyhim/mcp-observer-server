@@ -17,6 +17,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
+    "ruff>=0.2.0",
 ]
 
 [project.scripts]
@@ -29,10 +30,14 @@ build-backend = "hatchling.build"
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+
+[tool.ruff.lint]
 select = ["E", "F", "I"]
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["mcp_monitor_server"]
 
-[tool.pytest]
+[tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

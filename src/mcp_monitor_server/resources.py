@@ -4,12 +4,11 @@ Resource handling for the File Change Monitoring MCP server.
 import json
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
+from typing import AsyncGenerator, Dict, List, Tuple
 
 import anyio
-from pydantic import AnyUrl, BaseModel
 
-from .subscriptions import FileChange, Subscription, SubscriptionManager
+from .subscriptions import SubscriptionManager
 
 
 class ResourceManager:

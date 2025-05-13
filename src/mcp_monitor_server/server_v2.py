@@ -3,7 +3,6 @@ MCP server implementation for file change monitoring.
 """
 import asyncio
 import datetime
-import json
 import logging
 import os
 import sys
@@ -11,15 +10,14 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
-import anyio
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import Resource, ResourceTemplate
 from pydantic import BaseModel, Field
 
 from .resources import ResourceManager
-from .subscriptions import FileChange, Subscription, SubscriptionManager
+from .subscriptions import SubscriptionManager
 from .watcher import FileWatcher
 
 
@@ -409,6 +407,7 @@ async def get_changes_tool(input_data: GetChangesInput, ctx: Context) -> GetChan
 def main():
     """Run the server using stdio transport."""
     import asyncio
+
     from mcp.server.stdio import stdio_server
     
     async def run():

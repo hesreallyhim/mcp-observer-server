@@ -4,31 +4,33 @@ File system watcher for the File Change Monitoring MCP server.
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, TYPE_CHECKING, Tuple, TypeAlias
+from typing import (
+    AsyncGenerator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
-import anyio
 from watchdog.events import (
-    FileSystemEvent,
-    FileSystemEventHandler,
-    FileCreatedEvent,
-    FileDeletedEvent,
-    FileModifiedEvent,
-    FileMovedEvent,
     DirCreatedEvent,
     DirDeletedEvent,
     DirModifiedEvent,
-    DirMovedEvent
+    DirMovedEvent,
+    FileSystemEvent,
+    FileSystemEventHandler,
 )
 
 # Import for runtime
 from watchdog.observers import Observer
+
 # Import for type checking
 from watchdog.observers.api import BaseObserver, ObservedWatch
 
 # Define type aliases
 # ObserverType: TypeAlias = Observer
 # WatchType: TypeAlias = ObservedWatch
-
 from .subscriptions import SubscriptionManager
 
 

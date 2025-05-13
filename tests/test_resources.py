@@ -1,8 +1,8 @@
 """Tests for resource functionality."""
 import json
-import pytest
-import asyncio
 from pathlib import Path
+
+import pytest
 
 from mcp_monitor_server.server import FileMonitorMCPServer
 

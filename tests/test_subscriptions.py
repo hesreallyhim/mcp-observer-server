@@ -1,14 +1,13 @@
 """Tests for subscription functionality."""
 import json
-import pytest
-import asyncio
 from pathlib import Path
+
+import pytest
 
 from mcp_monitor_server.server import (
     FileMonitorMCPServer,
     SubscribeInput,
     UnsubscribeInput,
-    GetChangesInput
 )
 
 pytestmark = pytest.mark.asyncio
@@ -30,7 +29,7 @@ async def test_create_subscription(server: FileMonitorMCPServer, temp_dir: Path)
     assert "subscription_id" in response
     assert response["status"] == "active"
     assert response["path"] == str(temp_dir)
-    assert response["recursive"] == True
+    assert response["recursive"] is True
     
     # Verify subscription was stored
     subscription_id = response["subscription_id"]
@@ -61,7 +60,7 @@ async def test_unsubscribe(server: FileMonitorMCPServer, subscription: str):
     assert result[0].type == "text"
     
     response = json.loads(result[0].text)
-    assert response["success"] == True
+    assert response["success"] is True
     
     # Verify subscription was removed
     async with server.subscription_lock:
@@ -74,4 +73,4 @@ async def test_unsubscribe_nonexistent(server: FileMonitorMCPServer):
     assert result[0].type == "text"
     
     response = json.loads(result[0].text)
-    assert response["success"] == False
+    assert response["success"] is False

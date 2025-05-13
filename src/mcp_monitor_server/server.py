@@ -2,6 +2,14 @@
 File Change Monitoring MCP Server.
 
 An MCP server that monitors file system changes and notifies subscribed clients.
+Implements a subscription-based model where clients can:
+- Monitor specific files or directories
+- Apply patterns to filter relevant files
+- Receive real-time notifications when changes occur
+- Query historical changes
+
+This server uses the Watchdog library for file system events and the MCP protocol
+for client communication.
 """
 import asyncio
 import datetime
@@ -33,6 +41,8 @@ from watchdog.events import (
     DirDeletedEvent,
     DirModifiedEvent,
     DirMovedEvent,
+    # File event classes are imported for type matching in the Watchdog event system
+    # These are used indirectly when Watchdog passes events to our handler methods
     FileCreatedEvent,
     FileDeletedEvent,
     FileModifiedEvent,
@@ -44,15 +54,51 @@ from watchdog.observers import Observer
 from watchdog.observers.api import ObservedWatch
 
 
+# Default patterns to ignore in file monitoring
+DEFAULT_IGNORE_PATTERNS = [
+    # Virtual environments
+    "**/venv/**", "**/.venv/**", "**/env/**", "**/.env/**",
+    "**/virtualenv/**", "**/.virtualenv/**",
+    # Node modules and package caches
+    "**/node_modules/**", "**/.npm/**", "**/package-lock.json",
+    # Python caches
+    "**/__pycache__/**", "**/*.pyc", "**/*.pyo", "**/*.pyd",
+    "**/.pytest_cache/**", "**/.coverage", "**/.mypy_cache/**",
+    # Build directories
+    "**/build/**", "**/dist/**", "**/target/**", "**/out/**",
+    # IDE directories
+    "**/.idea/**", "**/.vscode/**", "**/.vs/**",
+    # Git directories
+    "**/.git/**", "**/.github/**", "**/.gitignore",
+    # Other common patterns
+    "**/.DS_Store", "**/Thumbs.db", "**/desktop.ini",
+    "**/*.log", "**/*.tmp", "**/*.temp"
+]
+
 # Define Models for Data Structures
 class FileChange(BaseModel):
-    """Represents a file change event."""
-    path: str
-    event: str  # "created", "modified", "deleted"
-    timestamp: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
+    """
+    Represents a file change event with path, event type, and timestamp.
+    
+    Attributes:
+        path: The file path that was changed
+        event: The type of event ("created", "modified", "deleted")
+        timestamp: When the change occurred (UTC)
+    """
+    path: str = Field(description="Path to the changed file or directory")
+    event: str = Field(description="Event type: created, modified, or deleted")
+    timestamp: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc),
+        description="When the change occurred (UTC timezone)"
+    )
 
     def to_dict(self) -> dict:
-        """Convert to dictionary representation."""
+        """
+        Convert to dictionary representation for JSON serialization.
+        
+        Returns:
+            Dict with path, event, and ISO-formatted timestamp
+        """
         return {
             "path": self.path,
             "event": self.event,
@@ -61,22 +107,64 @@ class FileChange(BaseModel):
 
 
 class Subscription(BaseModel):
-    """Represents a file monitoring subscription."""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    path: str
-    recursive: bool = False
-    patterns: List[str] = Field(default_factory=lambda: ["*"])
-    ignore_patterns: List[str] = Field(default_factory=list)
-    events: List[str] = Field(default_factory=lambda: ["created", "modified", "deleted"])
-    created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
-    changes: List[FileChange] = Field(default_factory=list)
-    resource_subscribers: Set[str] = Field(default_factory=set)
+    """
+    Represents a file monitoring subscription with filters and change history.
+    
+    Attributes:
+        id: Unique identifier for this subscription
+        path: Base path to monitor
+        recursive: Whether to monitor subdirectories
+        patterns: File patterns to include (glob format)
+        ignore_patterns: File patterns to exclude (glob format)
+        events: Types of events to track
+        created_at: When this subscription was created
+        changes: History of detected changes
+        resource_subscribers: Set of client IDs subscribed to updates
+    """
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier for this subscription"
+    )
+    path: str = Field(description="Base path to monitor for changes")
+    recursive: bool = Field(
+        default=False,
+        description="Whether to monitor subdirectories recursively"
+    )
+    patterns: List[str] = Field(
+        default_factory=lambda: ["*"],
+        description="File patterns to include (glob format, * for all files)"
+    )
+    ignore_patterns: List[str] = Field(
+        default_factory=list,
+        description="File patterns to exclude (glob format)"
+    )
+    events: List[str] = Field(
+        default_factory=lambda: ["created", "modified", "deleted"],
+        description="Types of events to track: created, modified, deleted"
+    )
+    created_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc),
+        description="When this subscription was created (UTC timezone)"
+    )
+    changes: List[FileChange] = Field(
+        default_factory=list,
+        description="History of detected changes"
+    )
+    resource_subscribers: Set[str] = Field(
+        default_factory=set,
+        description="Set of client IDs subscribed to receive change notifications"
+    )
 
     class Config:
         validate_assignment = True
 
     def to_dict(self) -> dict:
-        """Convert to dictionary representation."""
+        """
+        Convert to dictionary representation for JSON serialization.
+        
+        Returns:
+            Dict with subscription properties (excluding changes and subscribers)
+        """
         return {
             "id": self.id,
             "path": self.path,
@@ -88,7 +176,19 @@ class Subscription(BaseModel):
         }
 
     def add_change(self, path: str, event: str) -> Optional[FileChange]:
-        """Add a change event to this subscription."""
+        """
+        Add a change event to this subscription if it matches our event types.
+        
+        Args:
+            path: Path of the changed file/directory
+            event: Type of change event
+            
+        Returns:
+            The created FileChange object if the event was added, None otherwise
+            
+        Note:
+            Limits the history to 100 most recent events to prevent memory issues
+        """
         # Check if the event type is one we're monitoring
         if event not in self.events:
             return None
@@ -101,7 +201,15 @@ class Subscription(BaseModel):
         return change
 
     def get_changes_since(self, since: Optional[datetime.datetime] = None) -> List[FileChange]:
-        """Get changes that occurred after the specified time."""
+        """
+        Get changes that occurred after the specified time.
+        
+        Args:
+            since: Return only changes after this timestamp, or all if None
+            
+        Returns:
+            List of FileChange objects that match the time criteria
+        """
         if since is None:
             return self.changes
         
@@ -110,32 +218,93 @@ class Subscription(BaseModel):
 
 # Define Tool Input Models for validation
 class SubscribeInput(BaseModel):
-    path: str
-    recursive: bool = False
-    patterns: List[str] = Field(default_factory=lambda: ["*"])
-    ignore_patterns: List[str] = Field(default_factory=list)
-    events: List[str] = Field(default_factory=lambda: ["created", "modified", "deleted"])
+    """
+    Input parameters for the subscribe tool.
+    
+    Attributes:
+        path: File or directory path to monitor
+        recursive: Whether to monitor subdirectories
+        patterns: File patterns to include
+        ignore_patterns: File patterns to exclude
+        events: Types of events to track
+    """
+    path: str = Field(description="File or directory path to monitor")
+    recursive: bool = Field(
+        default=False,
+        description="Whether to monitor subdirectories recursively"
+    )
+    patterns: List[str] = Field(
+        default_factory=lambda: ["*"],
+        description="File patterns to include (glob format, * for all files)"
+    )
+    ignore_patterns: List[str] = Field(
+        default_factory=list,
+        description="File patterns to exclude (glob format)"
+    )
+    events: List[str] = Field(
+        default_factory=lambda: ["created", "modified", "deleted"],
+        description="Types of events to track: created, modified, deleted"
+    )
 
 
 class UnsubscribeInput(BaseModel):
-    subscription_id: str
+    """
+    Input parameters for the unsubscribe tool.
+    
+    Attributes:
+        subscription_id: ID of the subscription to cancel
+    """
+    subscription_id: str = Field(description="ID of the subscription to cancel")
 
 
 class GetChangesInput(BaseModel):
-    subscription_id: str
-    since: Optional[str] = None  # ISO formatted timestamp
+    """
+    Input parameters for the get_changes tool.
+    
+    Attributes:
+        subscription_id: ID of the subscription to get changes for
+        since: ISO-formatted timestamp to filter changes (optional)
+    """
+    subscription_id: str = Field(description="ID of the subscription to get changes for")
+    since: Optional[str] = Field(
+        default=None,
+        description="ISO-formatted timestamp to filter changes (optional)"
+    )
+
+
+class CreateMcpignoreInput(BaseModel):
+    """
+    Input parameters for the create_mcpignore tool.
+    
+    Attributes:
+        path: Directory where to create the .mcpignore file
+        include_defaults: Whether to include the default ignore patterns
+    """
+    path: str = Field(description="Directory where to create the .mcpignore file")
+    include_defaults: bool = Field(
+        default=True, 
+        description="Whether to include the default ignore patterns"
+    )
 
 
 class ToolNames(str, Enum):
-    """Enumeration of tool names."""
+    """
+    Enumeration of available tool names in the server API.
+    """
     SUBSCRIBE = "subscribe"
     UNSUBSCRIBE = "unsubscribe"
     LIST_SUBSCRIPTIONS = "list_subscriptions"
     GET_CHANGES = "get_changes"
+    CREATE_MCPIGNORE = "create_mcpignore"
 
 
 class FileChangeHandler(FileSystemEventHandler):
-    """Event handler for file system changes."""
+    """
+    Event handler for file system changes using Watchdog.
+    
+    Handles and filters file system events based on patterns and configuration,
+    then routes events to a callback function for processing.
+    """
 
     def __init__(
         self,
@@ -145,7 +314,16 @@ class FileChangeHandler(FileSystemEventHandler):
         ignore_directories: bool = False,
         callback: Optional[Callable[[str, str, str], None]] = None,
     ):
-        """Initialize the handler."""
+        """
+        Initialize the file change handler.
+        
+        Args:
+            subscription_id: ID of the subscription this handler belongs to
+            patterns: List of glob patterns to include files
+            ignore_patterns: List of glob patterns to exclude files
+            ignore_directories: Whether to ignore directory events
+            callback: Function to call when events are detected
+        """
         super().__init__()
         self.subscription_id = subscription_id
         self.patterns = patterns or ["*"]
@@ -154,13 +332,18 @@ class FileChangeHandler(FileSystemEventHandler):
         self.callback = callback
 
     def _should_process_event(self, event: FileSystemEvent) -> bool:
-        """Determine if an event should be processed based on patterns."""
+        """
+        Determine if an event should be processed based on patterns.
+        
+        Args:
+            event: The file system event to check
+            
+        Returns:
+            True if the event should be processed, False otherwise
+        """
         # Skip directory events if configured to do so
         if self.ignore_directories and (
-            isinstance(event, DirCreatedEvent) or
-            isinstance(event, DirDeletedEvent) or
-            isinstance(event, DirModifiedEvent) or
-            isinstance(event, DirMovedEvent)
+            isinstance(event, (DirCreatedEvent, DirDeletedEvent, DirModifiedEvent, DirMovedEvent))
         ):
             return False
             
@@ -181,29 +364,55 @@ class FileChangeHandler(FileSystemEventHandler):
         return len(self.patterns) == 0 or "*" in self.patterns
 
     def dispatch(self, event: FileSystemEvent) -> None:
-        """Dispatch events to the appropriate handlers."""
+        """
+        Dispatch events to the appropriate handlers after filtering.
+        
+        Args:
+            event: The file system event to dispatch
+        """
         if not self._should_process_event(event):
             return
             
         super().dispatch(event)
 
     def on_created(self, event: FileSystemEvent) -> None:
-        """Called when a file or directory is created."""
+        """
+        Called when a file or directory is created.
+        
+        Args:
+            event: The file creation event
+        """
         if self.callback:
             self.callback(self.subscription_id, str(event.src_path), "created")
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        """Called when a file or directory is deleted."""
+        """
+        Called when a file or directory is deleted.
+        
+        Args:
+            event: The file deletion event
+        """
         if self.callback:
             self.callback(self.subscription_id, str(event.src_path), "deleted")
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        """Called when a file or directory is modified."""
+        """
+        Called when a file or directory is modified.
+        
+        Args:
+            event: The file modification event
+        """
         if self.callback:
             self.callback(self.subscription_id, str(event.src_path), "modified")
             
     def on_moved(self, event: FileSystemEvent) -> None:
-        """Called when a file or directory is moved."""
+        """
+        Called when a file or directory is moved.
+        Treats moves as a delete+create operation.
+        
+        Args:
+            event: The file move event
+        """
         # Treat move as a delete+create operation
         if self.callback:
             self.callback(self.subscription_id, str(event.src_path), "deleted")
@@ -211,10 +420,23 @@ class FileChangeHandler(FileSystemEventHandler):
 
 
 class FileMonitorMCPServer:
-    """MCP server for monitoring file system changes."""
+    """
+    MCP server for monitoring file system changes.
+    
+    Provides an API for clients to:
+    - Subscribe to file/directory changes
+    - Set filters for events and file patterns
+    - Receive real-time notifications
+    - Query history of changes
+    
+    Uses the Watchdog library for file monitoring and the MCP protocol for
+    client communication.
+    """
     
     def __init__(self) -> None:
-        """Initialize server components."""
+        """
+        Initialize server components, storage, and logging.
+        """
         # Setup logging
         self.logger = logging.getLogger("file-monitor-mcp")
         handler = logging.StreamHandler(sys.stderr)
@@ -225,14 +447,14 @@ class FileMonitorMCPServer:
         self.logger.setLevel(logging.INFO)
         
         # Create MCP server
-        self.server: Server[Any] = Server("file-monitor-mcp")
+        self.server: Server[Any] = Server("mcp-monitor-server")
 
         # Setup storage
-        self.subscriptions: Dict[str, Subscription] = {}
-        self.observers: Dict[str, Any] = {}
-        self.handlers: Dict[str, FileChangeHandler] = {}
-        self.watches: Dict[str, Any] = {}
-        self.clients: Dict[str, Any] = {}
+        self.subscriptions: Dict[str, Subscription] = {}  # Subscription ID -> Subscription object
+        self.observers: Dict[str, Any] = {}  # Subscription ID -> Watchdog Observer
+        self.handlers: Dict[str, FileChangeHandler] = {}  # Subscription ID -> File Change Handler
+        self.watches: Dict[str, ObservedWatch] = {}  # Subscription ID -> Watchdog Watch
+        self.clients: Dict[str, Any] = {}  # Client ID -> MCP Session
         
         # Locks for thread safety
         self.subscription_lock = asyncio.Lock()
@@ -245,12 +467,25 @@ class FileMonitorMCPServer:
         # Register handlers
         self._register_handlers()
     
-    def _register_handlers(self):
-        """Register MCP protocol handlers."""
+    def _register_handlers(self) -> None:
+        """
+        Register MCP protocol handlers for tools, resources, and subscriptions.
+        
+        Sets up the server API to handle:
+        - Tool registration and execution
+        - Resource listing and access
+        - Resource subscription for notifications
+        - Logging configuration
+        """
         
         @self.server.list_tools()
         async def list_tools() -> List[Tool]:
-            """List all available tools."""
+            """
+            List all available tools for MCP clients.
+            
+            Returns:
+                List of Tool objects with name, description, and input schema
+            """
             self.logger.info("Listing tools")
             return [
                 Tool(
@@ -276,11 +511,28 @@ class FileMonitorMCPServer:
                     description="Retrieve recent changes for a specific subscription",
                     inputSchema=GetChangesInput.model_json_schema(),
                 ),
+                Tool(
+                    name=ToolNames.CREATE_MCPIGNORE,
+                    description="Create a .mcpignore file to specify file patterns to ignore",
+                    inputSchema=CreateMcpignoreInput.model_json_schema(),
+                ),
             ]
             
         @self.server.call_tool()
         async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-            """Call a tool."""
+            """
+            Call a specific tool with arguments.
+            
+            Args:
+                name: Name of the tool to call
+                arguments: Arguments to pass to the tool
+                
+            Returns:
+                List of TextContent objects with the tool's results
+                
+            Raises:
+                ValueError: If the tool name is unknown
+            """
             self.logger.info(f"Calling tool: {name} with arguments: {arguments}")
             
             match name:
@@ -299,6 +551,10 @@ class FileMonitorMCPServer:
                     get_changes_data = GetChangesInput.model_validate(arguments)
                     return await self._handle_get_changes_tool(get_changes_data)
                 
+                case ToolNames.CREATE_MCPIGNORE:
+                    create_mcpignore_data = CreateMcpignoreInput.model_validate(arguments)
+                    return await self._handle_create_mcpignore_tool(create_mcpignore_data)
+                
                 case _:
                     return [TextContent(
                         type="text",
@@ -309,7 +565,12 @@ class FileMonitorMCPServer:
         
         @self.server.list_resources()
         async def list_resources() -> List[Resource]:
-            """List all resources."""
+            """
+            List all available resources for MCP clients.
+            
+            Returns:
+                List of Resource objects, primarily subscription resources
+            """
             self.logger.info("Listing resources")
             resources = []
             
@@ -327,7 +588,12 @@ class FileMonitorMCPServer:
         
         @self.server.list_resource_templates()
         async def list_resource_templates() -> List[ResourceTemplate]:
-            """List all resource templates."""
+            """
+            List all resource templates for MCP clients.
+            
+            Returns:
+                List of ResourceTemplate objects defining the types of resources available
+            """
             self.logger.info("Listing resource templates")
             return [
                 ResourceTemplate(
@@ -351,14 +617,23 @@ class FileMonitorMCPServer:
             
         @self.server.read_resource()
         async def read_resource(uri: AnyUrl) -> str:
-            """Read a resource's content."""
+            """
+            Read a resource's content.
+            
+            Args:
+                uri: URI of the resource to read
+                
+            Returns:
+                String content of the resource
+                
+            Raises:
+                ValueError: If the URI is invalid or the resource doesn't exist
+            """
             self.logger.info(f"Reading resource: {uri}")
             
             # Parse the URI scheme and path
             if not uri or "://" not in str(uri) or not uri.scheme or not uri.path:
                 raise ValueError(f"Invalid resource URI: {uri}")
-            
-            # scheme, path = uri.split("://", 1)
             
             # Handle each resource type based on scheme
             match uri.scheme:
@@ -376,7 +651,16 @@ class FileMonitorMCPServer:
         
         @self.server.subscribe_resource()
         async def subscribe_resource(uri: AnyUrl) -> None:
-            """Subscribe to resource updates."""
+            """
+            Subscribe to resource updates.
+            
+            Args:
+                uri: URI of the resource to subscribe to
+                
+            Raises:
+                ValueError: If the resource doesn't support subscription
+                            or the subscription doesn't exist
+            """
             self.logger.info(f"Subscribing to resource: {uri}")
             
             # Only subscription resources support subscription
@@ -421,7 +705,12 @@ class FileMonitorMCPServer:
             
         @self.server.set_logging_level()
         async def set_logging_level(level: LoggingLevel) -> None:
-            """Set the server's logging level."""
+            """
+            Set the server's logging level.
+            
+            Args:
+                level: New logging level (trace, debug, info, warn, error, fatal)
+            """
             # Convert MCP logging level to Python logging level
             level_map = {
                 "trace": logging.DEBUG,
@@ -437,8 +726,43 @@ class FileMonitorMCPServer:
             self.logger.setLevel(python_level)
             self.logger.info(f"Logging level set to: {level}")
             
+    def _read_mcpignore_file(self, path: str) -> List[str]:
+        """
+        Read .mcpignore file if it exists and return patterns.
+        
+        Args:
+            path: Directory path where to look for .mcpignore
+            
+        Returns:
+            List of glob patterns to ignore
+        """
+        mcpignore_path = os.path.join(path, ".mcpignore")
+        patterns = []
+        
+        if os.path.isfile(mcpignore_path):
+            try:
+                with open(mcpignore_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        # Skip empty lines and comments
+                        if line and not line.startswith("#"):
+                            patterns.append(line)
+                self.logger.info(f"Loaded {len(patterns)} patterns from .mcpignore file")
+            except Exception as e:
+                self.logger.warning(f"Error reading .mcpignore file: {str(e)}")
+                
+        return patterns
+    
     async def _handle_subscribe_tool(self, input_data: SubscribeInput) -> List[TextContent]:
-        """Handle the subscribe tool."""
+        """
+        Handle the subscribe tool to create a new file monitor subscription.
+        
+        Args:
+            input_data: Validated input parameters for the subscription
+            
+        Returns:
+            List of TextContent objects with the subscription details or error
+        """
         path = input_data.path
         
         # Convert to absolute path if relative
@@ -453,13 +777,27 @@ class FileMonitorMCPServer:
                     "error": f"Path does not exist: {path}"
                 })
             )]
+        
+        # Combine ignore patterns from:
+        # 1. Default patterns
+        # 2. Patterns from .mcpignore file
+        # 3. User-provided patterns
+        ignore_patterns = list(DEFAULT_IGNORE_PATTERNS)
+        
+        # Add patterns from .mcpignore file if path is a directory
+        if os.path.isdir(path):
+            ignore_patterns.extend(self._read_mcpignore_file(path))
+        
+        # Add user-provided patterns, ensuring they have precedence
+        if input_data.ignore_patterns:
+            ignore_patterns.extend(input_data.ignore_patterns)
             
         # Create subscription
         subscription = Subscription(
             path=path,
             recursive=input_data.recursive,
             patterns=input_data.patterns,
-            ignore_patterns=input_data.ignore_patterns,
+            ignore_patterns=ignore_patterns,
             events=input_data.events
         )
         
@@ -469,7 +807,7 @@ class FileMonitorMCPServer:
             path=path,
             recursive=input_data.recursive,
             patterns=input_data.patterns,
-            ignore_patterns=input_data.ignore_patterns,
+            ignore_patterns=ignore_patterns,  # Use our combined ignore patterns
             ignore_directories=False
         )
         
@@ -498,7 +836,15 @@ class FileMonitorMCPServer:
         )]
     
     async def _handle_unsubscribe_tool(self, input_data: UnsubscribeInput) -> List[TextContent]:
-        """Handle the unsubscribe tool."""
+        """
+        Handle the unsubscribe tool to cancel an active subscription.
+        
+        Args:
+            input_data: Validated input parameters with the subscription ID
+            
+        Returns:
+            List of TextContent objects with success/failure message
+        """
         subscription_id = input_data.subscription_id
             
         # Stop watching
@@ -525,7 +871,12 @@ class FileMonitorMCPServer:
             )]
     
     async def _handle_list_subscriptions_tool(self) -> List[TextContent]:
-        """Handle the list_subscriptions tool."""
+        """
+        Handle the list_subscriptions tool to show all active subscriptions.
+        
+        Returns:
+            List of TextContent objects with subscription details
+        """
         async with self.subscription_lock:
             subscriptions_data = [
                 {
@@ -548,8 +899,112 @@ class FileMonitorMCPServer:
                 }, indent=2)
             )]
     
+    async def _handle_create_mcpignore_tool(self, input_data: CreateMcpignoreInput) -> List[TextContent]:
+        """
+        Handle the create_mcpignore tool to create a .mcpignore file.
+        
+        Args:
+            input_data: Validated input parameters with path and include_defaults flag
+            
+        Returns:
+            List of TextContent objects with the result or error message
+        """
+        path = input_data.path
+        
+        # Convert to absolute path if relative
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+            
+        # Check if path exists and is a directory
+        if not os.path.exists(path):
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Path does not exist: {path}"
+                })
+            )]
+            
+        if not os.path.isdir(path):
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Path is not a directory: {path}"
+                })
+            )]
+            
+        # Check if .mcpignore already exists
+        mcpignore_path = os.path.join(path, ".mcpignore")
+        if os.path.exists(mcpignore_path):
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f".mcpignore file already exists at {mcpignore_path}"
+                })
+            )]
+            
+        # Create .mcpignore file
+        try:
+            with open(mcpignore_path, "w") as f:
+                f.write("# MCP File Monitor ignore patterns\n")
+                f.write("# Lines starting with # are comments\n")
+                f.write("# Each line specifies a glob pattern to ignore\n")
+                f.write("\n")
+                
+                if input_data.include_defaults:
+                    # Group default patterns by category
+                    categories = {
+                        "Virtual environments": [p for p in DEFAULT_IGNORE_PATTERNS if "/venv/" in p or "/env/" in p],
+                        "Package management": [p for p in DEFAULT_IGNORE_PATTERNS if "node_modules" in p or "package-lock.json" in p or ".npm" in p],
+                        "Python caches": [p for p in DEFAULT_IGNORE_PATTERNS if "__pycache__" in p or ".pyc" in p or ".pytest_cache" in p or ".mypy_cache" in p],
+                        "Build artifacts": [p for p in DEFAULT_IGNORE_PATTERNS if "/build/" in p or "/dist/" in p or "/target/" in p or "/out/" in p],
+                        "IDE files": [p for p in DEFAULT_IGNORE_PATTERNS if ".idea" in p or ".vscode" in p or ".vs" in p],
+                        "Version control": [p for p in DEFAULT_IGNORE_PATTERNS if ".git" in p],
+                        "System files": [p for p in DEFAULT_IGNORE_PATTERNS if ".DS_Store" in p or "Thumbs.db" in p or "desktop.ini" in p],
+                        "Logs and temp files": [p for p in DEFAULT_IGNORE_PATTERNS if ".log" in p or ".tmp" in p or ".temp" in p]
+                    }
+                    
+                    for category, patterns in categories.items():
+                        if patterns:
+                            f.write(f"# {category}\n")
+                            for pattern in patterns:
+                                f.write(f"{pattern}\n")
+                            f.write("\n")
+                            
+                f.write("# Add your custom ignore patterns below\n")
+                f.write("# Examples:\n")
+                f.write("# **/custom-dir/**\n")
+                f.write("# **/*.bak\n")
+                
+            self.logger.info(f"Created .mcpignore file at {mcpignore_path}")
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "message": f"Created .mcpignore file at {mcpignore_path}",
+                    "path": mcpignore_path
+                }, indent=2)
+            )]
+            
+        except Exception as e:
+            self.logger.error(f"Error creating .mcpignore file: {str(e)}")
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Failed to create .mcpignore file: {str(e)}"
+                })
+            )]
+    
     async def _handle_get_changes_tool(self, input_data: GetChangesInput) -> List[TextContent]:
-        """Handle the get_changes tool."""
+        """
+        Handle the get_changes tool to retrieve recent changes for a subscription.
+        
+        Args:
+            input_data: Validated input parameters with subscription ID and optional timestamp
+            
+        Returns:
+            List of TextContent objects with changes or error message
+        """
         subscription_id = input_data.subscription_id
         
         # Parse since timestamp if provided
@@ -593,7 +1048,18 @@ class FileMonitorMCPServer:
             )]
     
     async def _read_file_resource(self, path: str) -> str:
-        """Read a file resource."""
+        """
+        Read a file resource's content.
+        
+        Args:
+            path: Path to the file
+            
+        Returns:
+            Content of the file as a string
+            
+        Raises:
+            ValueError: If the file doesn't exist or can't be read
+        """
         if not os.path.isfile(path):
             raise ValueError(f"File not found: {path}")
             
@@ -609,7 +1075,18 @@ class FileMonitorMCPServer:
             raise ValueError(f"Error reading file {path}: {str(e)}")
     
     async def _read_directory_resource(self, path: str) -> str:
-        """Read a directory resource."""
+        """
+        Read a directory resource's content.
+        
+        Args:
+            path: Path to the directory
+            
+        Returns:
+            JSON string with directory entries
+            
+        Raises:
+            ValueError: If the directory doesn't exist or can't be read
+        """
         if not os.path.isdir(path):
             raise ValueError(f"Directory not found: {path}")
             
@@ -623,7 +1100,10 @@ class FileMonitorMCPServer:
                     "path": entry.path,
                     "type": entry_type,
                     "size": entry.stat().st_size if entry.is_file() else None,
-                    "modified": entry.stat().st_mtime
+                    "modified": datetime.datetime.fromtimestamp(
+                        entry.stat().st_mtime, 
+                        tz=datetime.timezone.utc
+                    ).isoformat()
                 })
                 
             # Sort by name
@@ -638,7 +1118,18 @@ class FileMonitorMCPServer:
             raise ValueError(f"Error reading directory {path}: {str(e)}")
     
     async def _read_subscription_resource(self, subscription_id: str) -> str:
-        """Read a subscription resource."""
+        """
+        Read a subscription resource's content.
+        
+        Args:
+            subscription_id: ID of the subscription
+            
+        Returns:
+            JSON string with subscription details and recent changes
+            
+        Raises:
+            ValueError: If the subscription doesn't exist
+        """
         async with self.subscription_lock:
             if subscription_id not in self.subscriptions:
                 raise ValueError(f"Subscription not found: {subscription_id}")
@@ -659,14 +1150,29 @@ class FileMonitorMCPServer:
             return json.dumps(subscription_data, indent=2)
     
     def _handle_event(self, subscription_id: str, path: str, event_type: str) -> None:
-        """Handle a file system event by putting it in the queue."""
+        """
+        Handle a file system event by putting it in the queue.
+        
+        This method is called from the Watchdog thread and safely bridges
+        to the asyncio event loop by using run_coroutine_threadsafe.
+        
+        Args:
+            subscription_id: ID of the subscription that triggered the event
+            path: Path to the file/directory that changed
+            event_type: Type of event (created, modified, deleted)
+        """
         asyncio.run_coroutine_threadsafe(
             self.notification_queue.put((subscription_id, path, event_type)),
             asyncio.get_event_loop()
         )
     
     async def _process_notifications(self) -> None:
-        """Process notifications from the queue."""
+        """
+        Process notifications from the queue and distribute to subscribers.
+        
+        This runs as a background task, continuously pulling events from
+        the notification queue and notifying subscribed clients.
+        """
         self.logger.info("Starting notification processor")
         
         while not self.stopping:
@@ -681,7 +1187,7 @@ class FileMonitorMCPServer:
                         change = subscription.add_change(path, event_type)
                         
                         # Send notifications to all subscribers
-                        for client_id in subscription.resource_subscribers:
+                        for client_id in list(subscription.resource_subscribers):
                             session = self.clients.get(client_id)
                             if session:
                                 try:
@@ -690,6 +1196,7 @@ class FileMonitorMCPServer:
                                     )
                                 except Exception as e:
                                     self.logger.error(f"Error sending notification: {e}")
+                                    # Consider removing invalid subscribers here
                 
                 self.notification_queue.task_done()
                 
@@ -707,7 +1214,22 @@ class FileMonitorMCPServer:
         ignore_patterns: Optional[List[str]] = None,
         ignore_directories: bool = False,
     ) -> bool:
-        """Watch a path for changes."""
+        """
+        Watch a path for changes.
+        
+        Sets up a Watchdog observer to monitor file system events for the path.
+        
+        Args:
+            subscription_id: ID of the subscription
+            path: Path to watch
+            recursive: Whether to watch subdirectories
+            patterns: File patterns to include
+            ignore_patterns: File patterns to exclude
+            ignore_directories: Whether to ignore directory events
+            
+        Returns:
+            True if watching was successfully set up, False otherwise
+        """
         if not os.path.exists(path):
             return False
         
@@ -736,7 +1258,17 @@ class FileMonitorMCPServer:
         return True
     
     async def _unwatch(self, subscription_id: str) -> bool:
-        """Stop watching a subscription."""
+        """
+        Stop watching a subscription.
+        
+        Cleans up Watchdog observers for a subscription.
+        
+        Args:
+            subscription_id: ID of the subscription to stop watching
+            
+        Returns:
+            True if observer was stopped, False if it didn't exist
+        """
         observer = self.observers.get(subscription_id)
         watch = self.watches.get(subscription_id)
         
@@ -745,14 +1277,20 @@ class FileMonitorMCPServer:
             observer.stop()
             observer.join()
             
-            del self.observers[subscription_id]
-            del self.handlers[subscription_id]
-            del self.watches[subscription_id]
+            # Clean up references
+            if subscription_id in self.observers:
+                del self.observers[subscription_id]
+            if subscription_id in self.handlers:
+                del self.handlers[subscription_id]
+            if subscription_id in self.watches:
+                del self.watches[subscription_id]
             return True
         return False
     
     async def start(self) -> None:
-        """Start the server."""
+        """
+        Start the server and notification processor.
+        """
         self.logger.info("Starting file monitoring MCP server")
         
         # Start the notification processor
@@ -760,7 +1298,9 @@ class FileMonitorMCPServer:
         self.notification_task = asyncio.create_task(self._process_notifications())
     
     async def stop(self) -> None:
-        """Stop the server."""
+        """
+        Stop the server, notification processor, and all watchers.
+        """
         self.logger.info("Stopping file monitoring MCP server")
         
         # Stop the notification processor
@@ -778,7 +1318,17 @@ class FileMonitorMCPServer:
     
     @asynccontextmanager
     async def run(self) -> AsyncGenerator[None, None]:
-        """Run the server as a context manager."""
+        """
+        Run the server as a context manager.
+        
+        Usage:
+            async with server.run():
+                # Server is running here
+            # Server is stopped here
+        
+        Yields:
+            None
+        """
         await self.start()
         try:
             yield
@@ -787,7 +1337,9 @@ class FileMonitorMCPServer:
 
 
 async def serve() -> None:
-    """Run the server."""
+    """
+    Run the server using stdio for communication.
+    """
     server = FileMonitorMCPServer()
     
     # Initialize the server
@@ -800,18 +1352,17 @@ async def serve() -> None:
 
 
 def main() -> None:
-    """Main entry point."""
+    """
+    Main entry point for the server.
+    
+    Sets up logging and runs the server with asyncio.
+    """
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         stream=sys.stderr
     )
-    
-    # Parse command line arguments
-    # import argparse
-    # parser = argparse.ArgumentParser(description="File Change Monitoring MCP Server")
-    # args = parser.parse_args()
     
     # Run the server
     asyncio.run(serve())

@@ -85,6 +85,8 @@ Creates a new subscription to monitor file changes.
 - `subscription_id` (string): Unique identifier for the subscription
 - `status` (string): Status of the subscription ("active")
 
+> **Note:** When creating a subscription, the server automatically applies default ignore patterns (node_modules, venv, .git, etc.) and reads custom patterns from `.mcpignore` files if they exist in the monitored directory.
+
 ### 2. `unsubscribe`
 
 Cancels an active subscription.
@@ -133,6 +135,21 @@ Retrieves recent changes for a specific subscription.
   - `event` (string): Type of change event
   - `timestamp` (string): When the change occurred
 
+### 5. `create_mcpignore`
+
+Creates a `.mcpignore` file in the specified directory with predefined common patterns to ignore.
+
+**Parameters:**
+
+- `path` (string): Directory where to create the `.mcpignore` file
+- `include_defaults` (boolean, optional): Whether to include the default ignore patterns (default: `true`)
+
+**Returns:**
+
+- `success` (boolean): Whether the file was created successfully
+- `message` (string): Status message
+- `path` (string): Path to the created file
+
 ## Notification System
 
 The server uses the MCP notification mechanism to inform clients of file changes:
@@ -170,6 +187,53 @@ This generic file monitoring server supports various use cases, including:
 3. **Build Systems**: Automatic rebuilding of artifacts when dependencies change.
 4. **Live Preview**: Updating previews of documents, websites, or applications during development.
 5. **Synchronization**: Keeping multiple systems in sync when files change.
+
+## Ignoring Files with .mcpignore
+
+The server includes a flexible system for excluding files from monitoring, similar to `.gitignore`:
+
+### Default Ignore Patterns
+
+These patterns are automatically applied to all subscriptions:
+
+- **Virtual environments**: `**/venv/**`, `**/.venv/**`, `**/env/**`, etc.
+- **Package directories**: `**/node_modules/**`, `**/.npm/**`, etc.
+- **Cache directories**: `**/__pycache__/**`, `**/.pytest_cache/**`, etc.
+- **Build directories**: `**/build/**`, `**/dist/**`, `**/target/**`, etc.
+- **IDE files**: `**/.idea/**`, `**/.vscode/**`, etc.
+- **Version control**: `**/.git/**`, `**/.github/**`, etc.
+- **System files**: `**/.DS_Store`, `**/Thumbs.db`, etc.
+- **Temporary files**: `**/*.log`, `**/*.tmp`, etc.
+
+### Custom .mcpignore Files
+
+You can create custom `.mcpignore` files in any directory you monitor:
+
+1. Create the file manually or use the `create_mcpignore` tool
+2. Add one glob pattern per line (e.g., `**/*.bak`)
+3. Use `#` for comments
+
+Example `.mcpignore` file:
+
+```
+# Ignore build artifacts
+**/myapp/build/**
+**/*.min.js
+
+# Ignore large data files
+**/*.csv
+**/data/*.json
+```
+
+### Pattern Priority
+
+When determining which files to ignore, the server applies patterns in this order:
+
+1. User-provided patterns in the `subscribe` tool call (highest priority)
+2. Patterns from `.mcpignore` files (medium priority)
+3. Default built-in patterns (lowest priority)
+
+This allows fine-grained control of which files trigger notifications.
 
 ## Implementation Notes
 
@@ -233,19 +297,27 @@ Here's an example of how a client would interact with the server:
    })
    ```
 
-2. Get recent changes:
+2. Create an .mcpignore file:
+   ```
+   call_tool("create_mcpignore", {
+       "path": "/path/to/project",
+       "include_defaults": true
+   })
+   ```
+
+3. Get recent changes:
    ```
    changes = call_tool("get_changes", {
        "subscription_id": subscription_id
    })
    ```
 
-3. Read file contents:
+4. Read file contents:
    ```
    file_content = read_resource(f"file:///path/to/project/file.py")
    ```
 
-4. Clean up when done:
+5. Clean up when done:
    ```
    call_tool("unsubscribe", {
        "subscription_id": subscription_id

@@ -1,431 +1,821 @@
 """
-MCP Monitor Server - File monitoring server implementation using Model Context Protocol
-"""
+File Change Monitoring MCP Server.
 
+An MCP server that monitors file system changes and notifies subscribed clients.
+"""
 import asyncio
+import datetime
+import json
 import logging
+import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
-# from dataclasses import dataclass
-from datetime import datetime
+from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
-from collections.abc import AsyncIterator
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Set, Tuple, cast
 
-from mcp.server.fastmcp import Context, FastMCP, Image
-from pydantic import BaseModel, Field
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
+import anyio
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    EmptyResult,
+    LoggingLevel,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+    Tool,
+)
+from pydantic import AnyUrl, BaseModel, Field
+from watchdog.events import (
+    DirCreatedEvent,
+    DirDeletedEvent,
+    DirModifiedEvent,
+    DirMovedEvent,
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+    FileSystemEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
-if TYPE_CHECKING:
-    from watchdog.observers import ObserverType
+from watchdog.observers.api import ObservedWatch
 
-# Configure logging
-logger = logging.getLogger(__name__)
 
-# MCP server instance
+# Define Models for Data Structures
+class FileChange(BaseModel):
+    """Represents a file change event."""
+    path: str
+    event: str  # "created", "modified", "deleted"
+    timestamp: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary representation."""
+        return {
+            "path": self.path,
+            "event": self.event,
+            "timestamp": self.timestamp.isoformat()
+        }
 
 
 class Subscription(BaseModel):
-    """Model for file monitoring subscriptions."""
-    
+    """Represents a file monitoring subscription."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     path: str
     recursive: bool = False
-    created_at: datetime = Field(default_factory=datetime.now)
-    last_modified: datetime = Field(default_factory=datetime.now)
-    patterns: List[str] = Field(default_factory=list)
+    patterns: List[str] = Field(default_factory=lambda: ["*"])
     ignore_patterns: List[str] = Field(default_factory=list)
-    
-    # A set of client IDs subscribed to this path
-    clients: Set[str] = Field(default_factory=set)
+    events: List[str] = Field(default_factory=lambda: ["created", "modified", "deleted"])
+    created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
+    changes: List[FileChange] = Field(default_factory=list)
+    resource_subscribers: Set[str] = Field(default_factory=set)
+
+    class Config:
+        validate_assignment = True
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary representation."""
+        return {
+            "id": self.id,
+            "path": self.path,
+            "recursive": self.recursive,
+            "patterns": self.patterns,
+            "ignore_patterns": self.ignore_patterns,
+            "events": self.events,
+            "created_at": self.created_at.isoformat()
+        }
+
+    def add_change(self, path: str, event: str) -> Optional[FileChange]:
+        """Add a change event to this subscription."""
+        # Check if the event type is one we're monitoring
+        if event not in self.events:
+            return None
+        
+        change = FileChange(path=path, event=event)
+        self.changes.append(change)
+        # Limit changes list to recent 100 events to prevent memory bloat
+        if len(self.changes) > 100:
+            self.changes = self.changes[-100:]
+        return change
+
+    def get_changes_since(self, since: Optional[datetime.datetime] = None) -> List[FileChange]:
+        """Get changes that occurred after the specified time."""
+        if since is None:
+            return self.changes
+        
+        return [change for change in self.changes if change.timestamp > since]
 
 
-class FileChange(BaseModel):
-    """Model for file change events."""
-    
+# Define Tool Input Models for validation
+class SubscribeInput(BaseModel):
     path: str
-    event_type: str  # created, modified, deleted, moved
-    is_directory: bool
-    timestamp: datetime = Field(default_factory=datetime.now)
-    source_path: Optional[str] = None  # Only for moved events
+    recursive: bool = False
+    patterns: List[str] = Field(default_factory=lambda: ["*"])
+    ignore_patterns: List[str] = Field(default_factory=list)
+    events: List[str] = Field(default_factory=lambda: ["created", "modified", "deleted"])
 
 
-class MonitorServer(BaseModel):
-    """File monitoring server that watches for file changes."""
-    
-    # Path to monitor
-    base_path: Path
-    
-    # Observer for watching file system events
-    observer: ObserverType
-
-    # Mapping of subscription IDs to subscription objects
-    subscriptions: Dict[str, "Subscription"] = Field(default_factory=dict)
-
-    # Map of paths to subscription IDs that are monitoring them
-    path_subscriptions: Dict[str, Set[str]] = Field(default_factory=dict)
-
-    # Store recent changes for each subscription
-    recent_changes: Dict[str, List["FileChange"]] = Field(default_factory=dict)
-    
-    # Maximum number of changes to keep per subscription
-    max_changes_per_subscription: int = 100
+class UnsubscribeInput(BaseModel):
+    subscription_id: str
 
 
+class GetChangesInput(BaseModel):
+    subscription_id: str
+    since: Optional[str] = None  # ISO formatted timestamp
 
-class FileEventHandler(FileSystemEventHandler):
-    """Handler for file system events."""
-    
-    def __init__(self, server: MonitorServer):
-        self.server = server
-    
-    def dispatch(self, event: FileSystemEvent):
-        """
-        Dispatch events to the appropriate handler method and notify subscribers.
-        """
-        super().dispatch(event)
-        
-        # Common attributes for FileChange
-        is_directory = event.is_directory
-        path = event.src_path
-        
-        # Determine event type
-        if hasattr(event, 'dest_path'):  # Moved event
-            event_type = "moved"
-            file_change = FileChange(
-                path=str(event.dest_path),
-                event_type=event_type,
-                is_directory=is_directory,
-                source_path=str(path)
-            )
-        elif event.event_type == 'deleted':
-            event_type = "deleted"
-            file_change = FileChange(
-                path=str(path),
-                event_type=event_type,
-                is_directory=is_directory
-            )
-        elif event.event_type == 'created':
-            event_type = "created"
-            file_change = FileChange(
-                path=str(path),
-                event_type=event_type,
-                is_directory=is_directory
-            )
-        elif event.event_type == 'modified':
-            event_type = "modified"
-            file_change = FileChange(
-                path=str(path),
-                event_type=event_type,
-                is_directory=is_directory
-            )
-        else:
-            # Skip other events
-            return
-        
-        # Record the change for relevant subscriptions
-        self._record_change(file_change)
-    
-    def _record_change(self, change: FileChange):
-        """Record a file change for all relevant subscriptions."""
-        path = Path(change.path)
-        rel_path = str(path)
-        
-        # Find all subscriptions that should be notified about this change
-        for sub_id, subscription in self.server.subscriptions.items():
-            sub_path = Path(subscription.path)
+
+class ToolNames(str, Enum):
+    """Enumeration of tool names."""
+    SUBSCRIBE = "subscribe"
+    UNSUBSCRIBE = "unsubscribe"
+    LIST_SUBSCRIPTIONS = "list_subscriptions"
+    GET_CHANGES = "get_changes"
+
+
+class FileChangeHandler(FileSystemEventHandler):
+    """Event handler for file system changes."""
+
+    def __init__(
+        self,
+        subscription_id: str,
+        patterns: Optional[List[str]] = None,
+        ignore_patterns: Optional[List[str]] = None,
+        ignore_directories: bool = False,
+        callback: Optional[Callable[[str, str, str], None]] = None,
+    ):
+        """Initialize the handler."""
+        super().__init__()
+        self.subscription_id = subscription_id
+        self.patterns = patterns or ["*"]
+        self.ignore_patterns = ignore_patterns or []
+        self.ignore_directories = ignore_directories
+        self.callback = callback
+
+    def _should_process_event(self, event: FileSystemEvent) -> bool:
+        """Determine if an event should be processed based on patterns."""
+        # Skip directory events if configured to do so
+        if self.ignore_directories and (
+            isinstance(event, DirCreatedEvent) or
+            isinstance(event, DirDeletedEvent) or
+            isinstance(event, DirModifiedEvent) or
+            isinstance(event, DirMovedEvent)
+        ):
+            return False
             
-            # Check if this path is within the subscription's monitored path
-            try:
-                # For relative paths, use resolve to check if it's a child
-                if Path(subscription.path).is_absolute():
-                    is_child = Path(change.path).is_relative_to(Path(subscription.path))
-                else:
-                    # For non-absolute paths, do string-based check
-                    sub_str = str(sub_path)
-                    path_str = str(path)
-                    is_child = path_str.startswith(sub_str)
+        # Get the path to check against patterns and ensure it's a string
+        path = str(event.src_path)
+        
+        # Check if the path should be ignored
+        for pattern in self.ignore_patterns:
+            if fnmatch(path, str(pattern)):
+                return False
                 
-                if is_child:
-                    # Add to recent changes for this subscription
-                    if sub_id not in self.server.recent_changes:
-                        self.server.recent_changes[sub_id] = []
+        # Check if the path matches any include pattern
+        for pattern in self.patterns:
+            if fnmatch(path, str(pattern)):
+                return True
+                
+        # If we have specific patterns and none matched, ignore the event
+        return len(self.patterns) == 0 or "*" in self.patterns
+
+    def dispatch(self, event: FileSystemEvent) -> None:
+        """Dispatch events to the appropriate handlers."""
+        if not self._should_process_event(event):
+            return
+            
+        super().dispatch(event)
+
+    def on_created(self, event: FileSystemEvent) -> None:
+        """Called when a file or directory is created."""
+        if self.callback:
+            self.callback(self.subscription_id, str(event.src_path), "created")
+
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        """Called when a file or directory is deleted."""
+        if self.callback:
+            self.callback(self.subscription_id, str(event.src_path), "deleted")
+
+    def on_modified(self, event: FileSystemEvent) -> None:
+        """Called when a file or directory is modified."""
+        if self.callback:
+            self.callback(self.subscription_id, str(event.src_path), "modified")
+            
+    def on_moved(self, event: FileSystemEvent) -> None:
+        """Called when a file or directory is moved."""
+        # Treat move as a delete+create operation
+        if self.callback:
+            self.callback(self.subscription_id, str(event.src_path), "deleted")
+            self.callback(self.subscription_id, str(event.dest_path), "created")
+
+
+class FileMonitorMCPServer:
+    """MCP server for monitoring file system changes."""
+    
+    def __init__(self) -> None:
+        """Initialize server components."""
+        # Setup logging
+        self.logger = logging.getLogger("file-monitor-mcp")
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
+        
+        # Create MCP server
+        self.server: Server[Any] = Server("file-monitor-mcp")
+
+        # Setup storage
+        self.subscriptions: Dict[str, Subscription] = {}
+        self.observers: Dict[str, Any] = {}
+        self.handlers: Dict[str, FileChangeHandler] = {}
+        self.watches: Dict[str, Any] = {}
+        self.clients: Dict[str, Any] = {}
+        
+        # Locks for thread safety
+        self.subscription_lock = asyncio.Lock()
+        
+        # Setup notification queue
+        self.notification_queue: asyncio.Queue[Tuple[str, str, str]] = asyncio.Queue()
+        self.notification_task: Optional[asyncio.Task] = None
+        self.stopping = False
+        
+        # Register handlers
+        self._register_handlers()
+    
+    def _register_handlers(self):
+        """Register MCP protocol handlers."""
+        
+        @self.server.list_tools()
+        async def list_tools() -> List[Tool]:
+            """List all available tools."""
+            self.logger.info("Listing tools")
+            return [
+                Tool(
+                    name=ToolNames.SUBSCRIBE,
+                    description="Create a new subscription to monitor file changes",
+                    inputSchema=SubscribeInput.model_json_schema(),
+                ),
+                Tool(
+                    name=ToolNames.UNSUBSCRIBE,
+                    description="Cancel an active subscription",
+                    inputSchema=UnsubscribeInput.model_json_schema(),
+                ),
+                Tool(
+                    name=ToolNames.LIST_SUBSCRIPTIONS,
+                    description="List all active subscriptions",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    },
+                ),
+                Tool(
+                    name=ToolNames.GET_CHANGES,
+                    description="Retrieve recent changes for a specific subscription",
+                    inputSchema=GetChangesInput.model_json_schema(),
+                ),
+            ]
+            
+        @self.server.call_tool()
+        async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+            """Call a tool."""
+            self.logger.info(f"Calling tool: {name} with arguments: {arguments}")
+            
+            match name:
+                case ToolNames.SUBSCRIBE:
+                    input_data = SubscribeInput.model_validate(arguments)
+                    return await self._handle_subscribe_tool(input_data)
+                
+                case ToolNames.UNSUBSCRIBE:
+                    unsubscribe_data = UnsubscribeInput.model_validate(arguments)
+                    return await self._handle_unsubscribe_tool(unsubscribe_data)
+                
+                case ToolNames.LIST_SUBSCRIPTIONS:
+                    return await self._handle_list_subscriptions_tool()
+                
+                case ToolNames.GET_CHANGES:
+                    get_changes_data = GetChangesInput.model_validate(arguments)
+                    return await self._handle_get_changes_tool(get_changes_data)
+                
+                case _:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"Unknown tool: {name}"
+                        })
+                    )]
+        
+        @self.server.list_resources()
+        async def list_resources() -> List[Resource]:
+            """List all resources."""
+            self.logger.info("Listing resources")
+            resources = []
+            
+            # Add subscription resources
+            async with self.subscription_lock:
+                for subscription_id, subscription in self.subscriptions.items():
+                    resources.append(Resource(
+                        uri=AnyUrl(f"subscription://{subscription_id}"),
+                        name=f"Subscription: {subscription.path}",
+                        mimeType="application/json",
+                        description=f"File change notifications for {subscription.path}"
+                    ))
                     
-                    # Add to front of the list (newest first)
-                    self.server.recent_changes[sub_id].insert(0, change)
+            return resources
+        
+        @self.server.list_resource_templates()
+        async def list_resource_templates() -> List[ResourceTemplate]:
+            """List all resource templates."""
+            self.logger.info("Listing resource templates")
+            return [
+                ResourceTemplate(
+                    uriTemplate="file://{path}",
+                    name="File Content",
+                    description="Content of a file"
+                ),
+                ResourceTemplate(
+                    uriTemplate="dir://{path}",
+                    name="Directory Listing",
+                    description="List of files in a directory",
+                    mimeType="application/json"
+                ),
+                ResourceTemplate(
+                    uriTemplate="subscription://{subscription_id}",
+                    name="Subscription Status",
+                    description="Status and recent changes for a subscription",
+                    mimeType="application/json"
+                )
+            ]
+            
+        @self.server.read_resource()
+        async def read_resource(uri: AnyUrl) -> str:
+            """Read a resource's content."""
+            self.logger.info(f"Reading resource: {uri}")
+            
+            # Parse the URI scheme and path
+            if not uri or "://" not in str(uri) or not uri.scheme or not uri.path:
+                raise ValueError(f"Invalid resource URI: {uri}")
+            
+            # scheme, path = uri.split("://", 1)
+            
+            # Handle each resource type based on scheme
+            match uri.scheme:
+                case "file":
+                    return await self._read_file_resource(uri.path)
                     
-                    # Limit the number of changes stored
-                    if len(self.server.recent_changes[sub_id]) > self.server.max_changes_per_subscription:
-                        self.server.recent_changes[sub_id].pop()
+                case "dir":
+                    return await self._read_directory_resource(uri.path)
                     
-                    logger.debug(f"Recorded {change.event_type} event for subscription {sub_id}: {rel_path}")
+                case "subscription":
+                    return await self._read_subscription_resource(uri.path)
+                    
+                case _:
+                    raise ValueError(f"Unsupported resource scheme: {uri.scheme}")
+        
+        @self.server.subscribe_resource()
+        async def subscribe_resource(uri: AnyUrl) -> None:
+            """Subscribe to resource updates."""
+            self.logger.info(f"Subscribing to resource: {uri}")
+            
+            # Only subscription resources support subscription
+            if not str(uri).startswith("subscription://"):
+                raise ValueError(f"Resource does not support subscription: {uri}")
+
+            subscription_id = str(uri).split("://", 1)[1]
+
+            # Generate unique client ID for this subscription
+            client_id = str(uuid.uuid4())
+            
+            # Store client session for notifications
+            self.clients[client_id] = self.server.request_context.session
+            
+            # Add client as subscriber
+            async with self.subscription_lock:
+                if subscription_id not in self.subscriptions:
+                    raise ValueError(f"Subscription not found: {subscription_id}")
+            
+            subscription = self.subscriptions[subscription_id]
+            subscription.resource_subscribers.add(client_id)
+            
+            try:
+                # Keep subscription active until client disconnects
+                while True:
+                    await asyncio.sleep(60)  # Check every minute
+            except asyncio.CancelledError:
+                self.logger.info(f"Subscription cancelled: {uri}")
+            finally:
+                # Remove client as subscriber when done
+                async with self.subscription_lock:
+                    if subscription_id in self.subscriptions:
+                        subscription = self.subscriptions[subscription_id]
+                        if client_id in subscription.resource_subscribers:
+                            subscription.resource_subscribers.remove(client_id)
+                
+                # Remove client from clients dict
+                if client_id in self.clients:
+                    del self.clients[client_id]
+                
+            return None
+            
+        @self.server.set_logging_level()
+        async def set_logging_level(level: LoggingLevel) -> None:
+            """Set the server's logging level."""
+            # Convert MCP logging level to Python logging level
+            level_map = {
+                "trace": logging.DEBUG,
+                "debug": logging.DEBUG,
+                "info": logging.INFO,
+                "warn": logging.WARNING,
+                "error": logging.ERROR,
+                "fatal": logging.CRITICAL
+            }
+            python_level = level_map.get(level.lower(), logging.INFO)
+            
+            # Set the level
+            self.logger.setLevel(python_level)
+            self.logger.info(f"Logging level set to: {level}")
+            
+    async def _handle_subscribe_tool(self, input_data: SubscribeInput) -> List[TextContent]:
+        """Handle the subscribe tool."""
+        path = input_data.path
+        
+        # Convert to absolute path if relative
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+            
+        # Check if path exists
+        if not os.path.exists(path):
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Path does not exist: {path}"
+                })
+            )]
+            
+        # Create subscription
+        subscription = Subscription(
+            path=path,
+            recursive=input_data.recursive,
+            patterns=input_data.patterns,
+            ignore_patterns=input_data.ignore_patterns,
+            events=input_data.events
+        )
+        
+        # Start watching the path
+        success = await self._watch(
+            subscription_id=subscription.id,
+            path=path,
+            recursive=input_data.recursive,
+            patterns=input_data.patterns,
+            ignore_patterns=input_data.ignore_patterns,
+            ignore_directories=False
+        )
+        
+        if not success:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Failed to watch path: {path}"
+                })
+            )]
+            
+        # Store the subscription
+        async with self.subscription_lock:
+            self.subscriptions[subscription.id] = subscription
+            
+        # Return subscription details
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "subscription_id": subscription.id,
+                "status": "active",
+                "path": path,
+                "recursive": input_data.recursive,
+                "resource_uri": f"subscription://{subscription.id}"
+            }, indent=2)
+        )]
+    
+    async def _handle_unsubscribe_tool(self, input_data: UnsubscribeInput) -> List[TextContent]:
+        """Handle the unsubscribe tool."""
+        subscription_id = input_data.subscription_id
+            
+        # Stop watching
+        await self._unwatch(subscription_id)
+        
+        # Delete subscription
+        async with self.subscription_lock:
+            if subscription_id in self.subscriptions:
+                del self.subscriptions[subscription_id]
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "message": "Subscription successfully deleted"
+                    }, indent=2)
+                )]
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "message": "Subscription not found"
+                }, indent=2)
+            )]
+    
+    async def _handle_list_subscriptions_tool(self) -> List[TextContent]:
+        """Handle the list_subscriptions tool."""
+        async with self.subscription_lock:
+            subscriptions_data = [
+                {
+                    "id": subscription.id,
+                    "path": subscription.path,
+                    "recursive": subscription.recursive,
+                    "patterns": subscription.patterns,
+                    "ignore_patterns": subscription.ignore_patterns,
+                    "events": subscription.events,
+                    "created_at": subscription.created_at.isoformat(),
+                    "subscriber_count": len(subscription.resource_subscribers)
+                }
+                for subscription in self.subscriptions.values()
+            ]
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "subscriptions": subscriptions_data
+                }, indent=2)
+            )]
+    
+    async def _handle_get_changes_tool(self, input_data: GetChangesInput) -> List[TextContent]:
+        """Handle the get_changes tool."""
+        subscription_id = input_data.subscription_id
+        
+        # Parse since timestamp if provided
+        since = None
+        if input_data.since:
+            try:
+                since = datetime.datetime.fromisoformat(input_data.since)
+                if since.tzinfo is None:
+                    # Add UTC timezone if not specified
+                    since = since.replace(tzinfo=datetime.timezone.utc)
+            except ValueError:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Invalid timestamp format: {input_data.since}. Expected ISO format."
+                    })
+                )]
+        
+        # Get the subscription
+        async with self.subscription_lock:
+            if subscription_id not in self.subscriptions:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Subscription not found: {subscription_id}"
+                    })
+                )]
+                
+            subscription = self.subscriptions[subscription_id]
+            
+            # Get changes since the specified time
+            changes = subscription.get_changes_since(since)
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "subscription_id": subscription_id,
+                    "path": subscription.path,
+                    "changes": [change.to_dict() for change in changes]
+                }, indent=2)
+            )]
+    
+    async def _read_file_resource(self, path: str) -> str:
+        """Read a file resource."""
+        if not os.path.isfile(path):
+            raise ValueError(f"File not found: {path}")
+            
+        try:
+            async with await anyio.open_file(path, "rb") as file:
+                content = await file.read()
+                
+            # For simplicity, we'll assume it's utf-8 text
+            # In a production implementation, you would handle binary files differently
+            return content.decode("utf-8")
+            
+        except Exception as e:
+            raise ValueError(f"Error reading file {path}: {str(e)}")
+    
+    async def _read_directory_resource(self, path: str) -> str:
+        """Read a directory resource."""
+        if not os.path.isdir(path):
+            raise ValueError(f"Directory not found: {path}")
+            
+        try:
+            # Get directory contents
+            entries = []
+            for entry in os.scandir(path):
+                entry_type = "file" if entry.is_file() else "directory"
+                entries.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "type": entry_type,
+                    "size": entry.stat().st_size if entry.is_file() else None,
+                    "modified": entry.stat().st_mtime
+                })
+                
+            # Sort by name
+            entries.sort(key=lambda e: str(e["name"]))
+            
+            return json.dumps({
+                "path": path,
+                "entries": entries
+            }, indent=2)
+            
+        except Exception as e:
+            raise ValueError(f"Error reading directory {path}: {str(e)}")
+    
+    async def _read_subscription_resource(self, subscription_id: str) -> str:
+        """Read a subscription resource."""
+        async with self.subscription_lock:
+            if subscription_id not in self.subscriptions:
+                raise ValueError(f"Subscription not found: {subscription_id}")
+                
+            subscription = self.subscriptions[subscription_id]
+            
+            # Convert to dict for JSON serialization
+            subscription_data = subscription.to_dict()
+            
+            # Add recent changes
+            subscription_data["recent_changes"] = [
+                change.to_dict() for change in subscription.changes[-20:]  # Show last 20 changes
+            ]
+            
+            # Add subscriber count
+            subscription_data["subscriber_count"] = len(subscription.resource_subscribers)
+            
+            return json.dumps(subscription_data, indent=2)
+    
+    def _handle_event(self, subscription_id: str, path: str, event_type: str) -> None:
+        """Handle a file system event by putting it in the queue."""
+        asyncio.run_coroutine_threadsafe(
+            self.notification_queue.put((subscription_id, path, event_type)),
+            asyncio.get_event_loop()
+        )
+    
+    async def _process_notifications(self) -> None:
+        """Process notifications from the queue."""
+        self.logger.info("Starting notification processor")
+        
+        while not self.stopping:
+            try:
+                # Get the next notification
+                subscription_id, path, event_type = await self.notification_queue.get()
+                
+                # Add the change to the subscription
+                async with self.subscription_lock:
+                    if subscription_id in self.subscriptions:
+                        subscription = self.subscriptions[subscription_id]
+                        change = subscription.add_change(path, event_type)
+                        
+                        # Send notifications to all subscribers
+                        for client_id in subscription.resource_subscribers:
+                            session = self.clients.get(client_id)
+                            if session:
+                                try:
+                                    await session.send_resource_updated_notification(
+                                        uri=f"subscription://{subscription_id}"
+                                    )
+                                except Exception as e:
+                                    self.logger.error(f"Error sending notification: {e}")
+                
+                self.notification_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"Error handling change notification: {e}")
-
-
-# Create a global server instance
-_server: Optional[MonitorServer] = None
-
-
-@asynccontextmanager
-async def monitor_lifespan(server: FastMCP) -> AsyncIterator[MonitorServer]:
-    """Setup and teardown for the monitoring server."""
-    global _server
-
-    base_path = server.state.get("base_path", Path.cwd())
-    _server = MonitorServer(base_path=base_path)
-
-    # Start file system observer
-    event_handler = FileEventHandler(_server)
-    _server.observer.schedule(event_handler, str(base_path), recursive=True)
-    _server.observer.start()
-
-    logger.info(f"Started file monitoring for {base_path}")
-
-    try:
-        yield _server
-    finally:
-        # Stop observer on shutdown
-        if _server.observer.is_alive():
-            _server.observer.stop()
-            _server.observer.join()
-        logger.info("Stopped file monitoring")
-
-mcp = FastMCP(
-    name="MCP Monitor Server",
-    monitor_lifespan=monitor_lifespan,
-    stateless_http=True,
-)
-
-# Resources
-
-@mcp.resource("file://{path}")
-def get_file_content(path: str) -> str:
-    """Get the contents of a file."""
-    try:
-        file_path = Path(path)
-        if not file_path.exists():
-            return f"Error: File {path} does not exist"
-        
-        if file_path.is_dir():
-            return f"Error: {path} is a directory, not a file"
-        
-        # Read file content
-        return file_path.read_text()
-    except Exception as e:
-        logger.error(f"Error reading file {path}: {e}")
-        return f"Error reading file: {str(e)}"
-
-
-@mcp.resource("dir://{path}")
-def get_directory_listing(path: str) -> str:
-    """Get a directory listing with metadata."""
-    try:
-        dir_path = Path(path)
-        if not dir_path.exists():
-            return f"Error: Directory {path} does not exist"
-        
-        if not dir_path.is_dir():
-            return f"Error: {path} is a file, not a directory"
-        
-        # Get directory contents
-        entries = list(dir_path.iterdir())
-        
-        # Format as a readable listing
-        result = [f"Directory listing for {path}:"]
-        result.append("Name | Type | Size | Last Modified")
-        result.append("----|------|------|---------------")
-        
-        for entry in sorted(entries, key=lambda e: e.name):
-            entry_type = "Dir" if entry.is_dir() else "File"
-            size = "" if entry.is_dir() else f"{entry.stat().st_size} bytes"
-            last_modified = datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            result.append(f"{entry.name} | {entry_type} | {size} | {last_modified}")
-        
-        return "\n".join(result)
-    except Exception as e:
-        logger.error(f"Error listing directory {path}: {e}")
-        return f"Error listing directory: {str(e)}"
-
-
-@mcp.resource("subscription://{subscription_id}")
-def get_subscription_info(subscription_id: str) -> str:
-    """Get information about a subscription."""
-    if not _server:
-        return "Error: Server not initialized yet"
+                self.logger.error(f"Error processing notification: {e}")
     
-    if subscription_id not in _server.subscriptions:
-        return f"Error: Subscription with ID {subscription_id} not found"
+    async def _watch(
+        self, 
+        subscription_id: str, 
+        path: str, 
+        recursive: bool = False,
+        patterns: Optional[List[str]] = None,
+        ignore_patterns: Optional[List[str]] = None,
+        ignore_directories: bool = False,
+    ) -> bool:
+        """Watch a path for changes."""
+        if not os.path.exists(path):
+            return False
+        
+        # Stop existing observer for this subscription if any
+        await self._unwatch(subscription_id)
+        
+        # Create event handler
+        handler = FileChangeHandler(
+            subscription_id=subscription_id,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            ignore_directories=ignore_directories,
+            callback=self._handle_event,
+        )
+        
+        # Create observer
+        observer = Observer()
+        watch = observer.schedule(handler, path, recursive=recursive)
+        observer.start()
+        
+        # Store references
+        self.observers[subscription_id] = observer
+        self.handlers[subscription_id] = handler
+        self.watches[subscription_id] = watch
+        
+        return True
     
-    subscription = _server.subscriptions[subscription_id]
-    return (
-        f"Subscription: {subscription_id}\n"
-        f"Path: {subscription.path}\n"
-        f"Recursive: {subscription.recursive}\n"
-        f"Created: {subscription.created_at}\n"
-        f"Last modified: {subscription.last_modified}\n"
-        f"Include patterns: {', '.join(subscription.patterns) if subscription.patterns else 'All'}\n"
-        f"Ignore patterns: {', '.join(subscription.ignore_patterns) if subscription.ignore_patterns else 'None'}\n"
-    )
+    async def _unwatch(self, subscription_id: str) -> bool:
+        """Stop watching a subscription."""
+        observer = self.observers.get(subscription_id)
+        watch = self.watches.get(subscription_id)
+        
+        if observer and watch:
+            observer.unschedule(watch)
+            observer.stop()
+            observer.join()
+            
+            del self.observers[subscription_id]
+            del self.handlers[subscription_id]
+            del self.watches[subscription_id]
+            return True
+        return False
+    
+    async def start(self) -> None:
+        """Start the server."""
+        self.logger.info("Starting file monitoring MCP server")
+        
+        # Start the notification processor
+        self.stopping = False
+        self.notification_task = asyncio.create_task(self._process_notifications())
+    
+    async def stop(self) -> None:
+        """Stop the server."""
+        self.logger.info("Stopping file monitoring MCP server")
+        
+        # Stop the notification processor
+        self.stopping = True
+        if self.notification_task:
+            self.notification_task.cancel()
+            try:
+                await self.notification_task
+            except asyncio.CancelledError:
+                pass
+            
+        # Stop all watchers
+        for subscription_id in list(self.observers.keys()):
+            await self._unwatch(subscription_id)
+    
+    @asynccontextmanager
+    async def run(self) -> AsyncGenerator[None, None]:
+        """Run the server as a context manager."""
+        await self.start()
+        try:
+            yield
+        finally:
+            await self.stop()
 
 
-# Tools
+async def serve() -> None:
+    """Run the server."""
+    server = FileMonitorMCPServer()
+    
+    # Initialize the server
+    options = server.server.create_initialization_options()
+    
+    # Run the server with context manager to ensure cleanup
+    async with server.run():
+        async with stdio_server() as (read_stream, write_stream):
+            await server.server.run(read_stream, write_stream, options)
 
-@mcp.tool()
-def subscribe(path: str, recursive: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, ctx: Optional[Context] = None) -> str:
-    """
-    Create a subscription to monitor file changes.
-    
-    Args:
-        path: The path to monitor
-        recursive: Whether to recursively monitor subdirectories
-        patterns: Patterns to include (e.g., ["*.py", "*.txt"])
-        ignore_patterns: Patterns to ignore (e.g., ["*.pyc", "*.log"])
-        ctx: MCP context
-    
-    Returns:
-        Subscription ID
-    """
-    if not _server:
-        return "Error: Server not initialized yet"
-    
-    # Create new subscription
-    subscription = Subscription(
-        path=path,
-        recursive=recursive,
-        patterns=patterns or [],
-        ignore_patterns=ignore_patterns or []
+
+def main() -> None:
+    """Main entry point."""
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr
     )
     
-    # Add client ID to subscribed clients
-    if ctx and ctx.request_context and hasattr(ctx.request_context, "client_id"):
-        subscription.clients.add(ctx.request_context.client_id)
-    
-    # Store subscription
-    _server.subscriptions[subscription.id] = subscription
-    
-    # Update path mapping
-    if path not in _server.path_subscriptions:
-        _server.path_subscriptions[path] = set()
-    _server.path_subscriptions[path].add(subscription.id)
-    
-    # Initialize recent changes list
-    _server.recent_changes[subscription.id] = []
-    
-    logger.info(f"Created subscription {subscription.id} for path {path}")
-    
-    return subscription.id
-
-
-@mcp.tool()
-def unsubscribe(subscription_id: str) -> str:
-    """
-    Cancel a file monitoring subscription.
-    
-    Args:
-        subscription_id: The ID of the subscription to cancel
-    
-    Returns:
-        Confirmation message
-    """
-    if not _server:
-        return "Error: Server not initialized yet"
-    
-    if subscription_id not in _server.subscriptions:
-        return f"Error: Subscription with ID {subscription_id} not found"
-    
-    # Get the subscription
-    subscription = _server.subscriptions[subscription_id]
-    
-    # Remove from path mapping
-    if subscription.path in _server.path_subscriptions:
-        _server.path_subscriptions[subscription.path].discard(subscription_id)
-        if not _server.path_subscriptions[subscription.path]:
-            del _server.path_subscriptions[subscription.path]
-    
-    # Remove from subscriptions
-    del _server.subscriptions[subscription_id]
-    
-    # Remove from recent changes
-    if subscription_id in _server.recent_changes:
-        del _server.recent_changes[subscription_id]
-    
-    logger.info(f"Canceled subscription {subscription_id}")
-    
-    return f"Subscription {subscription_id} successfully canceled"
-
-
-@mcp.tool()
-def list_subscriptions() -> str:
-    """
-    List all active subscriptions.
-    
-    Returns:
-        A formatted list of active subscriptions
-    """
-    if not _server:
-        return "Error: Server not initialized yet"
-    
-    if not _server.subscriptions:
-        return "No active subscriptions"
-    
-    result = ["Active subscriptions:"]
-    result.append("ID | Path | Recursive | Created")
-    result.append("----|------|----------|--------")
-    
-    for sub_id, subscription in _server.subscriptions.items():
-        result.append(f"{sub_id} | {subscription.path} | {subscription.recursive} | {subscription.created_at}")
-    
-    return "\n".join(result)
-
-
-@mcp.tool()
-def get_changes(subscription_id: str, limit: int = 10) -> str:
-    """
-    Get recent file changes for a subscription.
-    
-    Args:
-        subscription_id: The ID of the subscription to query
-        limit: Maximum number of changes to return
-    
-    Returns:
-        A formatted list of recent changes
-    """
-    if not _server:
-        return "Error: Server not initialized yet"
-    
-    if subscription_id not in _server.subscriptions:
-        return f"Error: Subscription with ID {subscription_id} not found"
-    
-    if subscription_id not in _server.recent_changes or not _server.recent_changes[subscription_id]:
-        return f"No changes detected for subscription {subscription_id}"
-    
-    # Get changes (limited)
-    changes = _server.recent_changes[subscription_id][:limit]
-    
-    result = [f"Recent changes for subscription {subscription_id}:"]
-    result.append("Time | Type | Path | Is Directory")
-    result.append("-----|------|------|-------------")
-    
-    for change in changes:
-        timestamp = change.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        result.append(f"{timestamp} | {change.event_type} | {change.path} | {change.is_directory}")
-    
-    return "\n".join(result)
-
-
-async def serve(monitor_path: Path):
-    """
-    Start the MCP Monitor Server.
-    
-    Args:
-        monitor_path: Base path to monitor for file changes
-    """
-    # Add the monitor path to the server state
-    mcp.state["base_path"] = monitor_path
-    
-    # Set up the lifespan context for the server
-    mcp.lifespan = monitor_lifespan
+    # Parse command line arguments
+    # import argparse
+    # parser = argparse.ArgumentParser(description="File Change Monitoring MCP Server")
+    # args = parser.parse_args()
     
     # Run the server
-    await mcp.run_async()
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()

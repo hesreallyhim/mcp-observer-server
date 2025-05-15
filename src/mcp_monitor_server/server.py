@@ -26,6 +26,7 @@ from typing import (
     Any,
     AsyncGenerator,
     Callable,
+    Coroutine,
     Dict,
     List,
     Optional,
@@ -34,7 +35,8 @@ from typing import (
 )
 
 import anyio
-from mcp.server import Server
+from mcp import ResourcesCapability, ServerCapabilities
+from mcp.server import Server, InitializationOptions, NotificationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     LoggingLevel,
@@ -55,7 +57,7 @@ from watchdog.events import (
     FileSystemEventHandler,
 )
 from watchdog.observers import Observer
-from watchdog.observers.api import ObservedWatch
+from watchdog.observers.api import ObservedWatch, BaseObserver
 
 # Default patterns to ignore in file monitoring
 DEFAULT_IGNORE_PATTERNS = [
@@ -440,7 +442,7 @@ class FileMonitorMCPServer:
         Initialize server components, storage, and logging.
         """
         # Dictionary to store changes by subscription_id for easier testing
-        self._changes = {}
+        self._changes: dict[str, Any] = {}
         
         # Setup logging
         self.logger = logging.getLogger("file-monitor-mcp")
@@ -451,12 +453,12 @@ class FileMonitorMCPServer:
         self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
         
-        # Create MCP server
+        # Create MCP server - this is the actual Server instance from MCP
         self.server: Server[Any] = Server("mcp-monitor-server")
 
         # Setup storage
         self.subscriptions: Dict[str, Subscription] = {}  # Subscription ID -> Subscription object
-        self.observers: Dict[str, Any] = {}  # Subscription ID -> Watchdog Observer
+        self.observers: Dict[str, BaseObserver] = {}  # Subscription ID -> Watchdog Observer
         self.handlers: Dict[str, FileChangeHandler] = {}  # Subscription ID -> File Change Handler
         self.watches: Dict[str, ObservedWatch] = {}  # Subscription ID -> Watchdog Watch
         self.clients: Dict[str, Any] = {}  # Client ID -> MCP Session
@@ -637,22 +639,23 @@ class FileMonitorMCPServer:
             self.logger.info(f"Reading resource: {uri}")
             
             # Parse the URI scheme and path
-            if not uri or "://" not in str(uri) or not uri.scheme or not uri.path:
+            scheme, path = str(uri).split("://", 1)
+            if not uri or "://" not in str(uri) or not scheme or not path:
                 raise ValueError(f"Invalid resource URI: {uri}")
             
             # Handle each resource type based on scheme
-            match uri.scheme:
+            match scheme:
                 case "file":
-                    return await self._read_file_resource(uri.path)
+                    return await self._read_file_resource(path)
                     
                 case "dir":
-                    return await self._read_directory_resource(uri.path)
+                    return await self._read_directory_resource(path)
                     
                 case "subscription":
-                    return await self._read_subscription_resource(uri.path)
+                    return await self._read_subscription_resource(path)
                     
                 case _:
-                    raise ValueError(f"Unsupported resource scheme: {uri.scheme}")
+                    raise ValueError(f"Unsupported resource scheme: {scheme}")
         
         @self.server.subscribe_resource()
         async def subscribe_resource(uri: AnyUrl) -> None:
@@ -1180,17 +1183,46 @@ class FileMonitorMCPServer:
             path: Path to the file/directory that changed
             event_type: Type of event (created, modified, deleted)
         """
-        # For testing purposes, just store events directly
-        # This will work even without access to the event loop
-        # Thread safety is not a concern for tests
-        self._changes.setdefault(subscription_id, []).append({
+        # Store the event for testing purposes in a thread-safe way
+        # Create a new dict rather than modifying in place
+        change = {
             "path": path,
             "event": event_type,
             "timestamp": time.time()
-        })
+        }
         
-        # In a real implementation, we would use asyncio.run_coroutine_threadsafe
-        # to bridge the thread to the event loop, but for tests this is sufficient
+        # Get the current loop
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Update changes in a thread-safe way and add to notification queue
+            asyncio.run_coroutine_threadsafe(
+                self._add_change_to_queue(subscription_id, path, event_type, change),
+                loop
+            )
+        except RuntimeError:
+            # If we can't get event loop (testing context), just store directly
+            # This is not thread-safe, but is acceptable for testing
+            self._changes.setdefault(subscription_id, []).append(change)
+    
+    async def _add_change_to_queue(self, subscription_id: str, path: str, event_type: str, change: Dict[str, Any]) -> None:
+        """
+        Add a change to the notification queue and update the changes list
+        in a thread-safe way.
+        
+        Args:
+            subscription_id: ID of the subscription that triggered the event
+            path: Path to the file/directory that changed
+            event_type: Type of event (created, modified, deleted)
+            change: The change event data
+        """
+        # Update the changes dictionary in a thread-safe way
+        if subscription_id not in self._changes:
+            self._changes[subscription_id] = []
+        self._changes[subscription_id].append(change)
+        
+        # Add to notification queue for real-time updates
+        await self.notification_queue.put((subscription_id, path, event_type))
     
     async def _process_notifications(self) -> None:
         """
@@ -1341,54 +1373,83 @@ class FileMonitorMCPServer:
         # Stop all watchers
         for subscription_id in list(self.observers.keys()):
             await self._unwatch(subscription_id)
-    
-    @asynccontextmanager
-    async def run(self) -> AsyncGenerator[None, None]:
+
+    def get_capabilities(self, notification_options: NotificationOptions, experimental_capabilities: Dict[str, Dict[str, Any]] = dict()) -> ServerCapabilities:
         """
-        Run the server as a context manager.
+        Get the server capabilities for MCP initialization.
         
-        Usage:
-            async with server.run():
-                # Server is running here
-            # Server is stopped here
-        
-        Yields:
-            None
+        Args:
+            notification_options: Options for notifications
+            experimental_capabilities: Dict of experimental capabilities
+            
+        Returns:
+            Dict of server capabilities including supported resource schemes and subscription
         """
-        await self.start()
-        try:
-            yield
-        finally:
-            await self.stop()
+        if experimental_capabilities is None:
+            experimental_capabilities = {}
+
+        return self.server.get_capabilities(
+            notification_options=NotificationOptions(
+                prompts_changed=True,
+                resources_changed=True,
+                tools_changed=True
+            ),
+            experimental_capabilities=experimental_capabilities,
+        )
+    # Context manager approach replaced by direct start/stop in the run function
 
 
-async def serve(monitor_path: Optional[str] = None) -> None:
+async def run(monitor_path: Optional[str] = None) -> None:
     """
     Run the server using stdio for communication.
     
     Args:
         monitor_path: Optional path to monitor by default
     """
-    server = FileMonitorMCPServer()
+    # Create MCP server instance for file monitoring
+    file_monitor = FileMonitorMCPServer()
     
-    # Initialize the server
-    options = server.server.create_initialization_options()
+    # Start the monitoring services and notification processor
+    await file_monitor.start()
     
-    # Run the server with context manager to ensure cleanup
-    async with server.run():
+    try:
         # If monitor_path is provided, create a default subscription
         if monitor_path:
             try:
-                # Create a subscription for the monitor path
+                # Validate the path first
                 path = str(monitor_path)
-                sub_input = SubscribeInput(path=path, recursive=True)
-                await server._handle_subscribe_tool(sub_input)
-                server.logger.info(f"Created default subscription for path: {path}")
-            except Exception as e:
-                server.logger.error(f"Failed to create default subscription: {e}")
                 
+                # Convert to absolute path if relative
+                if not os.path.isabs(path):
+                    path = os.path.abspath(path)
+                
+                # Verify the path exists
+                if not os.path.exists(path):
+                    file_monitor.logger.error(f"Default monitor path does not exist: {path}")
+                else:
+                    # Create a subscription for the monitor path
+                    sub_input = SubscribeInput(path=path, recursive=True)
+                    await file_monitor._handle_subscribe_tool(sub_input)
+                    file_monitor.logger.info(f"Created default subscription for path: {path}")
+            except Exception as e:
+                file_monitor.logger.error(f"Failed to create default subscription: {e}")
+        
+        # Run the server using stdio communication
         async with stdio_server() as (read_stream, write_stream):
-            await server.server.run(read_stream, write_stream, options)
+            await file_monitor.server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="mcp-monitor-server",
+                    server_version="1.0.0",
+                    capabilities=file_monitor.get_capabilities(
+                        notification_options=NotificationOptions(),
+                    ),
+                ),
+            )
+    finally:
+        # Ensure server is properly stopped
+        await file_monitor.stop()
 
 
 def main() -> None:
@@ -1405,7 +1466,7 @@ def main() -> None:
     )
     
     # Run the server
-    asyncio.run(serve())
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

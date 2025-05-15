@@ -35,7 +35,7 @@ from typing import (
 )
 
 import anyio
-from mcp import ResourcesCapability, ServerCapabilities
+from mcp import ResourcesCapability, ServerCapabilities, ToolsCapability
 from mcp.server import Server, InitializationOptions, NotificationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -51,6 +51,10 @@ from watchdog.events import (
     DirDeletedEvent,
     DirModifiedEvent,
     DirMovedEvent,
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
     # File event classes are imported for type matching in the Watchdog event system
     # These are used indirectly when Watchdog passes events to our handler methods
     FileSystemEvent,
@@ -374,10 +378,29 @@ class FileChangeHandler(FileSystemEventHandler):
         Args:
             event: The file system event to dispatch
         """
+        # First, check if we should process this event based on patterns
         if not self._should_process_event(event):
             return
             
-        super().dispatch(event)
+        # Print event type for debugging
+        event_class = event.__class__.__name__
+        event_path = getattr(event, 'src_path', 'unknown_path')
+        print(f"Dispatching event: {event_class} for {event_path}")
+        
+        # Route the event to the correct handler explicitly
+        # This helps ensure we're calling the right handler for each event type
+        if isinstance(event, (FileCreatedEvent, DirCreatedEvent)):
+            self.on_created(event)
+        elif isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
+            self.on_deleted(event)
+        elif isinstance(event, (FileModifiedEvent, DirModifiedEvent)):
+            self.on_modified(event)
+        elif isinstance(event, (FileMovedEvent, DirMovedEvent)):
+            self.on_moved(event)
+        else:
+            # Fall back to standard dispatch if it's an unknown event type
+            print(f"WARNING: Unknown event type {event_class}, using default dispatch")
+            super().dispatch(event)
 
     def on_created(self, event: FileSystemEvent) -> None:
         """
@@ -386,8 +409,25 @@ class FileChangeHandler(FileSystemEventHandler):
         Args:
             event: The file creation event
         """
+        # Log creation events
+        event_class = event.__class__.__name__
+        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        
         if self.callback:
-            self.callback(self.subscription_id, str(event.src_path), "created")
+            # Make sure we're using a string path
+            path = str(event.src_path)
+            
+            # Determine the correct event type
+            if isinstance(event, (FileCreatedEvent, DirCreatedEvent)):
+                event_type = "created"
+            else:
+                print(f"WARNING: Unexpected event class {event_class} in on_created handler")
+                event_type = "created"  # Force the type for this handler
+                
+            print(f"Processed creation event as: {event_type}")
+                
+            # Call the event handler callback
+            self.callback(self.subscription_id, path, event_type)
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         """
@@ -396,8 +436,25 @@ class FileChangeHandler(FileSystemEventHandler):
         Args:
             event: The file deletion event
         """
+        # Log deletion events
+        event_class = event.__class__.__name__
+        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        
         if self.callback:
-            self.callback(self.subscription_id, str(event.src_path), "deleted")
+            # Make sure we're using a string path
+            path = str(event.src_path)
+            
+            # Determine the correct event type
+            if isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
+                event_type = "deleted"
+            else:
+                print(f"WARNING: Unexpected event class {event_class} in on_deleted handler")
+                event_type = "deleted"  # Force the type for this handler
+                
+            print(f"Processed deletion event as: {event_type}")
+                
+            # Call the event handler callback
+            self.callback(self.subscription_id, path, event_type)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """
@@ -406,8 +463,28 @@ class FileChangeHandler(FileSystemEventHandler):
         Args:
             event: The file modification event
         """
+        # Log the modification event with detailed information
+        event_class = event.__class__.__name__
+        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        
         if self.callback:
-            self.callback(self.subscription_id, str(event.src_path), "modified")
+            # Make sure we're using a string path
+            path = str(event.src_path)
+            
+            # Determine the correct event type based on the event class
+            # FileModifiedEvent should become "modified" 
+            # This ensures we're not confusing different event types
+            if isinstance(event, (FileModifiedEvent, DirModifiedEvent)):
+                event_type = "modified"
+            else:
+                # This branch should not be taken for modification events, but adding as a safeguard
+                print(f"WARNING: Unexpected event class {event_class} in on_modified handler")
+                event_type = "modified"  # Force the type for this handler
+            
+            print(f"Processed modification event as: {event_type}")
+            
+            # Call the event handler callback
+            self.callback(self.subscription_id, path, event_type)
             
     def on_moved(self, event: FileSystemEvent) -> None:
         """
@@ -417,10 +494,25 @@ class FileChangeHandler(FileSystemEventHandler):
         Args:
             event: The file move event
         """
+        # Log move events
+        event_class = event.__class__.__name__
+        print(f"Watchdog: {event_class} detected - {event.src_path} -> {event.dest_path}")
+        
         # Treat move as a delete+create operation
         if self.callback:
-            self.callback(self.subscription_id, str(event.src_path), "deleted")
-            self.callback(self.subscription_id, str(event.dest_path), "created")
+            # Verify we're working with a valid move event that has source and destination
+            if hasattr(event, 'src_path') and hasattr(event, 'dest_path'):
+                # Source path (treat as deleted)
+                src_path = str(event.src_path)
+                print(f"Processing move source as deletion: {src_path}")
+                self.callback(self.subscription_id, src_path, "deleted")
+                
+                # Destination path (treat as created)
+                dest_path = str(event.dest_path)
+                print(f"Processing move destination as creation: {dest_path}")
+                self.callback(self.subscription_id, dest_path, "created")
+            else:
+                print(f"WARNING: Move event missing source or destination path")
 
 
 class FileMonitorMCPServer:
@@ -451,7 +543,7 @@ class FileMonitorMCPServer:
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         ))
         self.logger.addHandler(handler)
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         
         # Create MCP server - this is the actual Server instance from MCP
         self.server: Server[Any] = Server("mcp-monitor-server")
@@ -1183,6 +1275,8 @@ class FileMonitorMCPServer:
             path: Path to the file/directory that changed
             event_type: Type of event (created, modified, deleted)
         """
+        self.logger.debug(f"Watchdog detected event: {event_type} at {path} for subscription {subscription_id}")
+        
         # Store the event for testing purposes in a thread-safe way
         # Create a new dict rather than modifying in place
         change = {
@@ -1194,16 +1288,33 @@ class FileMonitorMCPServer:
         # Get the current loop
         try:
             loop = asyncio.get_event_loop()
+            self.logger.debug(f"Adding {event_type} event to notification queue")
             
             # Update changes in a thread-safe way and add to notification queue
-            asyncio.run_coroutine_threadsafe(
+            fut = asyncio.run_coroutine_threadsafe(
                 self._add_change_to_queue(subscription_id, path, event_type, change),
                 loop
             )
-        except RuntimeError:
+            
+            # Optional: add callback to verify the task was processed
+            def done_callback(future):
+                try:
+                    future.result()
+                    self.logger.debug(f"Successfully processed {event_type} event for {path}")
+                except Exception as e:
+                    self.logger.error(f"Error processing event in background task: {e}")
+                    
+            fut.add_done_callback(done_callback)
+            
+        except RuntimeError as e:
+            self.logger.warning(f"Could not get event loop: {str(e)}")
             # If we can't get event loop (testing context), just store directly
             # This is not thread-safe, but is acceptable for testing
             self._changes.setdefault(subscription_id, []).append(change)
+            self.logger.debug(f"Stored {event_type} event directly (no event loop)")
+            
+        except Exception as e:
+            self.logger.error(f"Unexpected error handling {event_type} event: {str(e)}")
     
     async def _add_change_to_queue(self, subscription_id: str, path: str, event_type: str, change: Dict[str, Any]) -> None:
         """
@@ -1237,6 +1348,7 @@ class FileMonitorMCPServer:
             try:
                 # Get the next notification
                 subscription_id, path, event_type = await self.notification_queue.get()
+                self.logger.debug(f"Processing notification: {event_type} at {path} for subscription {subscription_id}")
                 
                 # Add the change to the subscription
                 async with self.subscription_lock:
@@ -1244,21 +1356,33 @@ class FileMonitorMCPServer:
                         subscription = self.subscriptions[subscription_id]
                         change = subscription.add_change(path, event_type)
                         
+                        # Log subscribers count 
+                        subscriber_count = len(subscription.resource_subscribers)
+                        self.logger.debug(f"Found {subscriber_count} subscribers for notification")
+                        
                         # Send notifications to all subscribers
                         for client_id in list(subscription.resource_subscribers):
                             session = self.clients.get(client_id)
                             if session:
                                 try:
+                                    self.logger.debug(f"Sending notification to client {client_id[:8]}... for resource subscription://{subscription_id}")
                                     await session.send_resource_updated_notification(
                                         uri=f"subscription://{subscription_id}"
                                     )
+                                    self.logger.debug(f"Successfully sent notification to client {client_id[:8]}...")
                                 except Exception as e:
-                                    self.logger.error(f"Error sending notification: {e}")
+                                    self.logger.error(f"Error sending notification to client {client_id[:8]}...: {e}")
                                     # Consider removing invalid subscribers here
+                            else:
+                                self.logger.warning(f"Client {client_id[:8]}... has no active session")
+                    else:
+                        self.logger.warning(f"Subscription {subscription_id} not found when processing notification")
                 
                 self.notification_queue.task_done()
+                self.logger.debug(f"Notification processing completed for {event_type} at {path}")
                 
             except asyncio.CancelledError:
+                self.logger.info("Notification processor cancelled")
                 break
             except Exception as e:
                 self.logger.error(f"Error processing notification: {e}")
@@ -1383,19 +1507,31 @@ class FileMonitorMCPServer:
             experimental_capabilities: Dict of experimental capabilities
             
         Returns:
-            Dict of server capabilities including supported resource schemes and subscription
+            ServerCapabilities with resource subscriptions enabled
         """
-        if experimental_capabilities is None:
-            experimental_capabilities = {}
-
-        return self.server.get_capabilities(
-            notification_options=NotificationOptions(
-                prompts_changed=True,
-                resources_changed=True,
-                tools_changed=True
-            ),
-            experimental_capabilities=experimental_capabilities,
+        # Default parameter is already handled (dict())
+            
+        # Create capabilities for resources and tools
+        resource_capability = ResourcesCapability(
+            subscribe=True,  # Enable resource subscriptions
+            listChanged=True  # Enable resource list notifications
         )
+        
+        tools_capability = ToolsCapability(
+            listChanged=True  # Enable tool list notifications
+        )
+            
+        # Get base capabilities from the server
+        capabilities = self.server.get_capabilities(
+            notification_options=NotificationOptions(),
+            experimental_capabilities=experimental_capabilities
+        )
+        
+        # Set the custom capabilities
+        capabilities.resources = resource_capability
+        capabilities.tools = tools_capability
+        
+        return capabilities
     # Context manager approach replaced by direct start/stop in the run function
 
 
@@ -1460,7 +1596,7 @@ def main() -> None:
     """
     # Configure logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,  # Set to DEBUG to see all log messages
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         stream=sys.stderr
     )

@@ -10,6 +10,12 @@ Implements a subscription-based model where clients can:
 
 This server uses the Watchdog library for file system events and the MCP protocol
 for client communication.
+
+IMPORTANT: This implementation includes special handling for macOS-specific fsevents issues
+where file modifications are sometimes incorrectly reported as directory deletion events.
+This is due to how the FSEvents API works in macOS. Our workaround checks if a
+"deleted directory" event still has an existing file at the specified path, and if so,
+reclassifies it as a file modification event.
 """
 import asyncio
 import datetime
@@ -382,13 +388,21 @@ class FileChangeHandler(FileSystemEventHandler):
         if not self._should_process_event(event):
             return
             
-        # Print event type for debugging
+        # Get event details for debugging
         event_class = event.__class__.__name__
         event_path = getattr(event, 'src_path', 'unknown_path')
-        print(f"Dispatching event: {event_class} for {event_path}")
+        is_directory = getattr(event, 'is_directory', None)
         
+        print(f"Dispatching event: {event_class} for {event_path} (is_directory={is_directory})")
+        
+        # Handle macOS-specific fsevents anomaly where file modifications trigger DirDeletedEvent
+        if isinstance(event, DirDeletedEvent) and os.path.isfile(event_path):
+            print(f"Correcting macOS fsevents anomaly: {event_class} -> FileModifiedEvent for {event_path}")
+            # Pass to the on_deleted handler which has special logic to handle this case
+            self.on_deleted(event)
+            return
+            
         # Route the event to the correct handler explicitly
-        # This helps ensure we're calling the right handler for each event type
         if isinstance(event, (FileCreatedEvent, DirCreatedEvent)):
             self.on_created(event)
         elif isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
@@ -398,9 +412,22 @@ class FileChangeHandler(FileSystemEventHandler):
         elif isinstance(event, (FileMovedEvent, DirMovedEvent)):
             self.on_moved(event)
         else:
-            # Fall back to standard dispatch if it's an unknown event type
-            print(f"WARNING: Unknown event type {event_class}, using default dispatch")
-            super().dispatch(event)
+            # Special handling for synthetic or platform-specific events
+            print(f"WARNING: Unknown event type {event_class}, attempting to categorize")
+            
+            # Try to intelligently categorize based on event attributes and file system state
+            if hasattr(event, 'is_synthetic') and event.is_synthetic:
+                print(f"Synthetic event detected, checking file state")
+                if os.path.exists(event_path):
+                    print(f"File exists, treating as modification")
+                    self.on_modified(event)
+                else:
+                    print(f"File doesn't exist, treating as deletion")
+                    self.on_deleted(event)
+            else:
+                # If all else fails, use the standard dispatch
+                print(f"Using default dispatch for {event_class}")
+                super().dispatch(event)
 
     def on_created(self, event: FileSystemEvent) -> None:
         """
@@ -444,14 +471,23 @@ class FileChangeHandler(FileSystemEventHandler):
             # Make sure we're using a string path
             path = str(event.src_path)
             
-            # Determine the correct event type
-            if isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
+            # Handle macOS fsevents special case where file modifications are reported as directory deletions
+            # This happens due to how the FSEvents API works on macOS
+            is_macos_modification_bug = False
+            
+            if isinstance(event, DirDeletedEvent) and os.path.isfile(path):
+                # This is a misclassified event - a file still exists but was reported as a deleted directory
+                print(f"Detected macOS fsevents anomaly: DirDeletedEvent for existing file {path}")
+                is_macos_modification_bug = True
+                event_type = "modified"  # Reclassify as a modification event
+            elif isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
+                # Normal deletion event
                 event_type = "deleted"
             else:
                 print(f"WARNING: Unexpected event class {event_class} in on_deleted handler")
                 event_type = "deleted"  # Force the type for this handler
                 
-            print(f"Processed deletion event as: {event_type}")
+            print(f"Processed event as: {event_type} (was originally a {event_class})")
                 
             # Call the event handler callback
             self.callback(self.subscription_id, path, event_type)
@@ -761,34 +797,63 @@ class FileMonitorMCPServer:
                 ValueError: If the resource doesn't support subscription
                             or the subscription doesn't exist
             """
-            self.logger.info(f"Subscribing to resource: {uri}")
+            uri_str = str(uri)
+            
+            # Get info about the requesting client
+            client_info = getattr(self.server.request_context, 'client_info', 'unknown')
+            self.logger.info(f"Subscription request from {client_info} for resource: {uri_str}")
+            print(f"🔔 NEW SUBSCRIPTION REQUEST from {client_info} for {uri_str}")
             
             # Only subscription resources support subscription
-            if not str(uri).startswith("subscription://"):
-                raise ValueError(f"Resource does not support subscription: {uri}")
+            if not uri_str.startswith("subscription://"):
+                error_msg = f"Resource does not support subscription: {uri_str}"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
 
-            subscription_id = str(uri).split("://", 1)[1]
+            subscription_id = uri_str.split("://", 1)[1]
 
             # Generate unique client ID for this subscription
             client_id = str(uuid.uuid4())
             
             # Store client session for notifications
-            self.clients[client_id] = self.server.request_context.session
+            current_session = self.server.request_context.session
+            self.clients[client_id] = current_session
             
-            # Add client as subscriber
+            # Add client as subscriber under lock to ensure thread safety
             async with self.subscription_lock:
                 if subscription_id not in self.subscriptions:
-                    raise ValueError(f"Subscription not found: {subscription_id}")
-            
-            subscription = self.subscriptions[subscription_id]
-            subscription.resource_subscribers.add(client_id)
+                    error_msg = f"Subscription not found: {subscription_id}"
+                    self.logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                subscription = self.subscriptions[subscription_id]
+                subscription.resource_subscribers.add(client_id)
+                
+                # Log successful subscription
+                subscriber_count = len(subscription.resource_subscribers)
+                self.logger.info(f"Client {client_id[:8]}... subscribed to {uri_str} (total subscribers: {subscriber_count})")
+                print(f"✅ SUBSCRIPTION REGISTERED: Client {client_id[:8]}... subscribed to {uri_str}")
+                
+                # Send initial "test" notification to confirm subscription is working
+                try:
+                    # This sends an immediate resource update notification to verify channel works
+                    print(f"🔄 Sending initial test notification to client {client_id[:8]}...")
+                    await current_session.send_resource_updated(uri=AnyUrl(uri_str))
+                    print(f"✅ Initial test notification sent successfully")
+                except Exception as e:
+                    print(f"❌ Failed to send initial test notification: {str(e)}")
+                    self.logger.error(f"Failed to send initial test notification: {str(e)}")
             
             try:
                 # Keep subscription active until client disconnects
+                # Poll more frequently to check for client health
                 while True:
-                    await asyncio.sleep(60)  # Check every minute
+                    await asyncio.sleep(10)  # Check every 10 seconds for better responsiveness
+                    
+                    # For debugging - periodically confirm the subscription is still active
+                    self.logger.debug(f"Subscription {subscription_id} for client {client_id[:8]}... still active")
             except asyncio.CancelledError:
-                self.logger.info(f"Subscription cancelled: {uri}")
+                self.logger.info(f"Subscription cancelled: {uri_str}")
             finally:
                 # Remove client as subscriber when done
                 async with self.subscription_lock:
@@ -796,10 +861,12 @@ class FileMonitorMCPServer:
                         subscription = self.subscriptions[subscription_id]
                         if client_id in subscription.resource_subscribers:
                             subscription.resource_subscribers.remove(client_id)
+                            self.logger.info(f"Removed client {client_id[:8]}... from subscription {subscription_id}")
                 
                 # Remove client from clients dict
                 if client_id in self.clients:
                     del self.clients[client_id]
+                    self.logger.info(f"Removed client {client_id[:8]}... from clients dictionary")
                 
             return None
             
@@ -923,7 +990,29 @@ class FileMonitorMCPServer:
         async with self.subscription_lock:
             self.subscriptions[subscription.id] = subscription
             
-        # Return subscription details
+            # Automatically register the creating client as a subscriber
+            # This ensures that the client who creates a subscription receives notifications
+            try:
+                if hasattr(self.server, 'request_context') and hasattr(self.server.request_context, 'session'):
+                    # Generate unique client ID for this subscription
+                    client_id = str(uuid.uuid4())
+                    
+                    # Store client session for notifications
+                    current_session = self.server.request_context.session
+                    self.clients[client_id] = current_session
+                    
+                    # Add this client as a subscriber
+                    subscription.resource_subscribers.add(client_id)
+                    
+                    # Log the automatic subscription
+                    self.logger.info(f"Auto-subscribed client to subscription {subscription.id}")
+                    print(f"✅ AUTO-SUBSCRIBED: Tool creator auto-subscribed to {subscription.id}")
+            except Exception as e:
+                # Non-critical error, the tool can still succeed
+                self.logger.warning(f"Could not auto-subscribe tool creator: {str(e)}")
+            
+        # Return subscription details with subscriber count
+        subscriber_count = len(subscription.resource_subscribers)
         return [TextContent(
             type="text",
             text=json.dumps({
@@ -931,7 +1020,9 @@ class FileMonitorMCPServer:
                 "status": "active",
                 "path": path,
                 "recursive": input_data.recursive,
-                "resource_uri": f"subscription://{subscription.id}"
+                "resource_uri": f"subscription://{subscription.id}",
+                "subscriber_count": subscriber_count,
+                "auto_subscribed": subscriber_count > 0
             }, indent=2)
         )]
     
@@ -1327,13 +1418,37 @@ class FileMonitorMCPServer:
             event_type: Type of event (created, modified, deleted)
             change: The change event data
         """
-        # Update the changes dictionary in a thread-safe way
-        if subscription_id not in self._changes:
-            self._changes[subscription_id] = []
-        self._changes[subscription_id].append(change)
-        
-        # Add to notification queue for real-time updates
-        await self.notification_queue.put((subscription_id, path, event_type))
+        try:
+            # Update the changes dictionary in a thread-safe way
+            if subscription_id not in self._changes:
+                self._changes[subscription_id] = []
+            
+            self._changes[subscription_id].append(change)
+            
+            self.logger.debug(f"Adding {event_type} event for {path} to notification queue")
+            
+            # Add to notification queue for real-time updates with a timeout to prevent deadlock
+            try:
+                # Use asyncio.wait_for to enforce a timeout
+                await asyncio.wait_for(
+                    self.notification_queue.put((subscription_id, path, event_type)),
+                    timeout=5.0  # 5 second timeout
+                )
+                self.logger.debug(f"Successfully queued {event_type} event")
+            except asyncio.TimeoutError:
+                self.logger.error(f"Timeout while adding to notification queue - queue might be full or blocked")
+                # Still record the change even if notification queue is stuck
+                
+        except Exception as e:
+            # Catch-all for any unexpected errors
+            self.logger.error(f"Error adding change to queue: {str(e)}")
+            # At least try to add it to the in-memory changes
+            try:
+                if subscription_id not in self._changes:
+                    self._changes[subscription_id] = []
+                self._changes[subscription_id].append(change)
+            except Exception:
+                pass  # Last resort - if we can't even add to the changes dict
     
     async def _process_notifications(self) -> None:
         """
@@ -1346,46 +1461,94 @@ class FileMonitorMCPServer:
         
         while not self.stopping:
             try:
-                # Get the next notification
-                subscription_id, path, event_type = await self.notification_queue.get()
-                self.logger.debug(f"Processing notification: {event_type} at {path} for subscription {subscription_id}")
+                # Get the next notification with timeout to prevent blocking forever
+                try:
+                    notification = await asyncio.wait_for(
+                        self.notification_queue.get(), 
+                        timeout=1.0
+                    )
+                    subscription_id, path, event_type = notification
+                except asyncio.TimeoutError:
+                    # Just loop around and check if we're stopping
+                    continue
+                
+                self.logger.info(f"Processing notification: {event_type} event at {path} for subscription {subscription_id}")
                 
                 # Add the change to the subscription
                 async with self.subscription_lock:
-                    if subscription_id in self.subscriptions:
-                        subscription = self.subscriptions[subscription_id]
-                        change = subscription.add_change(path, event_type)
-                        
-                        # Log subscribers count 
-                        subscriber_count = len(subscription.resource_subscribers)
-                        self.logger.debug(f"Found {subscriber_count} subscribers for notification")
-                        
-                        # Send notifications to all subscribers
-                        for client_id in list(subscription.resource_subscribers):
-                            session = self.clients.get(client_id)
-                            if session:
-                                try:
-                                    self.logger.debug(f"Sending notification to client {client_id[:8]}... for resource subscription://{subscription_id}")
-                                    await session.send_resource_updated_notification(
-                                        uri=f"subscription://{subscription_id}"
-                                    )
-                                    self.logger.debug(f"Successfully sent notification to client {client_id[:8]}...")
-                                except Exception as e:
-                                    self.logger.error(f"Error sending notification to client {client_id[:8]}...: {e}")
-                                    # Consider removing invalid subscribers here
-                            else:
-                                self.logger.warning(f"Client {client_id[:8]}... has no active session")
-                    else:
+                    if subscription_id not in self.subscriptions:
                         self.logger.warning(f"Subscription {subscription_id} not found when processing notification")
+                        self.notification_queue.task_done()
+                        continue
+                        
+                    subscription = self.subscriptions[subscription_id]
+                    change = subscription.add_change(path, event_type)
+                    
+                    # Skip if the change was not added (e.g. filtered by event type)
+                    if change is None:
+                        self.logger.debug(f"Change not added to subscription (filtered by event type)")
+                        self.notification_queue.task_done()
+                        continue
+                    
+                    # Log subscribers count 
+                    subscriber_count = len(subscription.resource_subscribers)
+                    self.logger.info(f"Found {subscriber_count} subscribers for notification")
+                    
+                    if subscriber_count == 0:
+                        self.logger.info(f"No subscribers for subscription {subscription_id}, skipping notifications")
+                        self.notification_queue.task_done()
+                        continue
+                    
+                    # Track successes for logging
+                    sent_count = 0
+                    error_count = 0
+                    
+                    # Send notifications to all subscribers
+                    for client_id in list(subscription.resource_subscribers):
+                        session = self.clients.get(client_id)
+                        if session:
+                            try:
+                                # Print clear logging with a distinctive marker
+                                print(f"⚡ SENDING NOTIFICATION: {event_type} event for {path} to client {client_id[:8]}...")
+                                self.logger.info(f"Sending notification to client {client_id[:8]}... for resource subscription://{subscription_id}")
+                                
+                                # Use wait_for to enforce a timeout on sending notifications
+                                # The correct method is send_resource_updated (not send_resource_updated_notification)
+                                await asyncio.wait_for(
+                                    session.send_resource_updated(
+                                        uri=AnyUrl(f"subscription://{subscription_id}")
+                                    ),
+                                    timeout=5.0
+                                )
+                                
+                                # Log success with a distinctive marker
+                                print(f"✅ NOTIFICATION SENT SUCCESSFULLY to client {client_id[:8]}...")
+                                self.logger.info(f"Successfully sent notification to client {client_id[:8]}...")
+                                sent_count += 1
+                            except Exception as e:
+                                error_msg = str(e)
+                                print(f"❌ NOTIFICATION ERROR: {error_msg}")
+                                self.logger.error(f"Error sending notification to client {client_id[:8]}...: {error_msg}")
+                                error_count += 1
+                                # Keep subscriber for now, might be a temporary issue
+                        else:
+                            self.logger.warning(f"Client {client_id[:8]}... has no active session, removing subscriber")
+                            # Clean up subscriptions without active sessions
+                            subscription.resource_subscribers.remove(client_id)
+                    
+                    # Log summary of what happened
+                    self.logger.info(f"Notification summary: {sent_count} sent, {error_count} failed")
                 
+                # Mark this notification as done
                 self.notification_queue.task_done()
-                self.logger.debug(f"Notification processing completed for {event_type} at {path}")
+                self.logger.info(f"Notification processing completed for {event_type} at {path}")
                 
             except asyncio.CancelledError:
                 self.logger.info("Notification processor cancelled")
                 break
             except Exception as e:
-                self.logger.error(f"Error processing notification: {e}")
+                self.logger.error(f"Unexpected error in notification processor: {str(e)}")
+                # Continue processing other notifications even if one fails
     
     async def _watch(
         self, 
@@ -1532,7 +1695,32 @@ class FileMonitorMCPServer:
         capabilities.tools = tools_capability
         
         return capabilities
-    # Context manager approach replaced by direct start/stop in the run function
+    @asynccontextmanager
+    async def lifespan(self) -> AsyncGenerator[None, None]:
+        """
+        Server lifespan context manager.
+        
+        Properly manages server lifecycle including initialization and cleanup.
+        This ensures the server components are properly started before handling
+        requests and properly cleaned up after.
+        
+        Yields:
+            None
+        """
+        try:
+            # Start all server components
+            await self.start()
+            self.logger.info("Server started via lifespan context manager")
+            
+            # Wait for everything to initialize
+            await asyncio.sleep(0.5)
+            
+            # Server is now ready to handle requests
+            yield
+        finally:
+            # Always ensure cleanup
+            self.logger.info("Server shutting down via lifespan context manager")
+            await self.stop()
 
 
 async def run(monitor_path: Optional[str] = None) -> None:
@@ -1544,11 +1732,19 @@ async def run(monitor_path: Optional[str] = None) -> None:
     """
     # Create MCP server instance for file monitoring
     file_monitor = FileMonitorMCPServer()
+    file_monitor.logger.info("Starting MCP Monitor Server")
     
-    # Start the monitoring services and notification processor
-    await file_monitor.start()
+    # Prepare initialization options
+    init_options = InitializationOptions(
+        server_name="mcp-monitor-server",
+        server_version="1.0.0",
+        capabilities=file_monitor.get_capabilities(
+            notification_options=NotificationOptions(),
+        ),
+    )
     
-    try:
+    # Use the server's lifespan context manager for proper lifecycle management
+    async with file_monitor.lifespan():
         # If monitor_path is provided, create a default subscription
         if monitor_path:
             try:
@@ -1564,28 +1760,24 @@ async def run(monitor_path: Optional[str] = None) -> None:
                     file_monitor.logger.error(f"Default monitor path does not exist: {path}")
                 else:
                     # Create a subscription for the monitor path
+                    file_monitor.logger.info(f"Creating default subscription for {path}")
                     sub_input = SubscribeInput(path=path, recursive=True)
-                    await file_monitor._handle_subscribe_tool(sub_input)
-                    file_monitor.logger.info(f"Created default subscription for path: {path}")
+                    result = await file_monitor._handle_subscribe_tool(sub_input)
+                    file_monitor.logger.info(f"Default subscription created: {result[0].text}")
             except Exception as e:
                 file_monitor.logger.error(f"Failed to create default subscription: {e}")
         
         # Run the server using stdio communication
         async with stdio_server() as (read_stream, write_stream):
+            # Run with proper initialization
+            file_monitor.logger.info("Starting server with STDIO communication")
+            
+            # Run the server, which will block until shutdown
             await file_monitor.server.run(
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name="mcp-monitor-server",
-                    server_version="1.0.0",
-                    capabilities=file_monitor.get_capabilities(
-                        notification_options=NotificationOptions(),
-                    ),
-                ),
+                init_options,
             )
-    finally:
-        # Ensure server is properly stopped
-        await file_monitor.stop()
 
 
 def main() -> None:

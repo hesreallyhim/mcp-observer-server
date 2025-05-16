@@ -438,7 +438,7 @@ class FileChangeHandler(FileSystemEventHandler):
         """
         # Log creation events
         event_class = event.__class__.__name__
-        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        print(f"Watchdog: {event_class} detected for {str(event.src_path)}")
         
         if self.callback:
             # Make sure we're using a string path
@@ -465,7 +465,7 @@ class FileChangeHandler(FileSystemEventHandler):
         """
         # Log deletion events
         event_class = event.__class__.__name__
-        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        print(f"Watchdog: {event_class} detected for {str(event.src_path)}")
         
         if self.callback:
             # Make sure we're using a string path
@@ -501,7 +501,7 @@ class FileChangeHandler(FileSystemEventHandler):
         """
         # Log the modification event with detailed information
         event_class = event.__class__.__name__
-        print(f"Watchdog: {event_class} detected for {event.src_path}")
+        print(f"Watchdog: {event_class} detected for {str(event.src_path)}")
         
         if self.callback:
             # Make sure we're using a string path
@@ -532,7 +532,7 @@ class FileChangeHandler(FileSystemEventHandler):
         """
         # Log move events
         event_class = event.__class__.__name__
-        print(f"Watchdog: {event_class} detected - {event.src_path} -> {event.dest_path}")
+        print(f"Watchdog: {event_class} detected - {str(event.src_path)} -> {str(event.src_path)}")
         
         # Treat move as a delete+create operation
         if self.callback:

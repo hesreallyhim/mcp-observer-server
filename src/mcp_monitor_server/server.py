@@ -11,8 +11,9 @@ Implements a subscription-based model where clients can:
 This server uses the Watchdog library for file system events and the MCP protocol
 for client communication.
 
-IMPORTANT: This implementation includes special handling for macOS-specific fsevents issues
-where file modifications are sometimes incorrectly reported as directory deletion events.
+IMPORTANT: This implementation includes special handling for macOS-specific fsevents
+where file modifications are sometimes incorrectly reported as directory deletion
+events.
 This is due to how the FSEvents API works in macOS. Our workaround checks if a
 "deleted directory" event still has an existing file at the specified path, and if so,
 reclassifies it as a file modification event.
@@ -33,7 +34,6 @@ from typing import (
     Any,
     AsyncGenerator,
     Callable,
-    Coroutine,
     Dict,
     List,
     Optional,
@@ -43,7 +43,7 @@ from typing import (
 
 import anyio
 from mcp import ResourcesCapability, ServerCapabilities, ToolsCapability
-from mcp.server import Server, InitializationOptions, NotificationOptions
+from mcp.server import InitializationOptions, NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     LoggingLevel,
@@ -68,7 +68,18 @@ from watchdog.events import (
     FileSystemEventHandler,
 )
 from watchdog.observers import Observer
-from watchdog.observers.api import ObservedWatch, BaseObserver
+from watchdog.observers.api import BaseObserver, ObservedWatch
+
+
+# JSON encoder for datetime objects
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles datetime objects by converting to ISO format."""
+
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 
 # Default patterns to ignore in file monitoring
 DEFAULT_IGNORE_PATTERNS = [
@@ -395,13 +406,16 @@ class FileChangeHandler(FileSystemEventHandler):
         is_directory = getattr(event, "is_directory", None)
 
         print(
-            f"Dispatching event: {event_class} for {event_path} (is_directory={is_directory})"
+            f"Dispatching event: {event_class} for {event_path} "
+            f"(is_directory={is_directory})"
         )
 
-        # Handle macOS-specific fsevents anomaly where file modifications trigger DirDeletedEvent
+        # Handle macOS-specific fsevents anomaly where file modifications trigger
+        # DirDeletedEvent
         if isinstance(event, DirDeletedEvent) and os.path.isfile(event_path):
             print(
-                f"Correcting macOS fsevents anomaly: {event_class} -> FileModifiedEvent for {event_path}"
+                f"Correcting macOS fsevents anomaly: {event_class} -> "
+                f"FileModifiedEvent for {event_path}"
             )
             # Pass to the on_deleted handler which has special logic to handle this case
             self.on_deleted(event)
@@ -422,14 +436,14 @@ class FileChangeHandler(FileSystemEventHandler):
                 f"WARNING: Unknown event type {event_class}, attempting to categorize"
             )
 
-            # Try to intelligently categorize based on event attributes and file system state
+            # Try to intelligently categorize based on event attributes and file system
             if hasattr(event, "is_synthetic") and event.is_synthetic:
-                print(f"Synthetic event detected, checking file state")
+                print("Synthetic event detected, checking file state")
                 if os.path.exists(event_path):
-                    print(f"File exists, treating as modification")
+                    print("File exists, treating as modification")
                     self.on_modified(event)
                 else:
-                    print(f"File doesn't exist, treating as deletion")
+                    print("File doesn't exist, treating as deletion")
                     self.on_deleted(event)
             else:
                 # If all else fails, use the standard dispatch
@@ -455,9 +469,7 @@ class FileChangeHandler(FileSystemEventHandler):
             if isinstance(event, (FileCreatedEvent, DirCreatedEvent)):
                 event_type = "created"
             else:
-                print(
-                    f"WARNING: Unexpected event class {event_class} in on_created handler"
-                )
+                print(f"WARNING: Unexpected event class {event_class} in on_created")
                 event_type = "created"  # Force the type for this handler
 
             print(f"Processed creation event as: {event_type}")
@@ -480,24 +492,23 @@ class FileChangeHandler(FileSystemEventHandler):
             # Make sure we're using a string path
             path = str(event.src_path)
 
-            # Handle macOS fsevents special case where file modifications are reported as directory deletions
+            # Handle macOS special case where file modifications are reported as
+            # directory deletions
             # This happens due to how the FSEvents API works on macOS
-            is_macos_modification_bug = False
+            # Variable removed due to F841 - assigned but not used
 
             if isinstance(event, DirDeletedEvent) and os.path.isfile(path):
-                # This is a misclassified event - a file still exists but was reported as a deleted directory
+                # Misclassified event - file exists but reported as deleted dir
                 print(
-                    f"Detected macOS fsevents anomaly: DirDeletedEvent for existing file {path}"
+                    f"Detected macOS fsevents anomaly: DirDeletedEvent for file {path}"
                 )
-                is_macos_modification_bug = True
+                # is_macos_modification_bug = True  # Set but not used, comment out
                 event_type = "modified"  # Reclassify as a modification event
             elif isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
                 # Normal deletion event
                 event_type = "deleted"
             else:
-                print(
-                    f"WARNING: Unexpected event class {event_class} in on_deleted handler"
-                )
+                print(f"WARNING: Unexpected event class {event_class} in on_deleted")
                 event_type = "deleted"  # Force the type for this handler
 
             print(f"Processed event as: {event_type} (was originally a {event_class})")
@@ -526,10 +537,8 @@ class FileChangeHandler(FileSystemEventHandler):
             if isinstance(event, (FileModifiedEvent, DirModifiedEvent)):
                 event_type = "modified"
             else:
-                # This branch should not be taken for modification events, but adding as a safeguard
-                print(
-                    f"WARNING: Unexpected event class {event_class} in on_modified handler"
-                )
+                # Safeguard branch for unexpected event classes
+                print(f"WARNING: Unexpected class {event_class} in on_modified handler")
                 event_type = "modified"  # Force the type for this handler
 
             print(f"Processed modification event as: {event_type}")
@@ -548,12 +557,13 @@ class FileChangeHandler(FileSystemEventHandler):
         # Log move events
         event_class = event.__class__.__name__
         print(
-            f"Watchdog: {event_class} detected - {str(event.src_path)} -> {str(event.src_path)}"
+            f"Watchdog: {event_class} detected - {str(event.src_path)} -> "
+            f"{str(event.dest_path)}"
         )
 
         # Treat move as a delete+create operation
         if self.callback:
-            # Verify we're working with a valid move event that has source and destination
+            # Verify event has valid source and destination attributes
             if hasattr(event, "src_path") and hasattr(event, "dest_path"):
                 # Source path (treat as deleted)
                 src_path = str(event.src_path)
@@ -565,7 +575,7 @@ class FileChangeHandler(FileSystemEventHandler):
                 print(f"Processing move destination as creation: {dest_path}")
                 self.callback(self.subscription_id, dest_path, "created")
             else:
-                print(f"WARNING: Move event missing source or destination path")
+                print("WARNING: Move event missing source or destination path")
 
 
 class FileMonitorMCPServer:
@@ -668,7 +678,7 @@ class FileMonitorMCPServer:
                 ),
                 Tool(
                     name=ToolNames.CREATE_MCPIGNORE,
-                    description="Create a .mcpignore file to specify file patterns to ignore",
+                    description="Create a .mcpignore file with patterns to ignore",
                     inputSchema=CreateMcpignoreInput.model_json_schema(),
                 ),
             ]
@@ -741,7 +751,7 @@ class FileMonitorMCPServer:
                             uri=AnyUrl(f"subscription://{subscription_id}"),
                             name=f"Subscription: {subscription.path}",
                             mimeType="application/json",
-                            description=f"File change notifications for {subscription.path}",
+                            description=f"Change notifications for {subscription.path}",
                         )
                     )
 
@@ -753,7 +763,7 @@ class FileMonitorMCPServer:
             List all resource templates for MCP clients.
 
             Returns:
-                List of ResourceTemplate objects defining the types of resources available
+                List of ResourceTemplate objects defining resource types
             """
             self.logger.info("Listing resource templates")
             return [
@@ -860,20 +870,17 @@ class FileMonitorMCPServer:
                 # Log successful subscription
                 subscriber_count = len(subscription.resource_subscribers)
                 self.logger.info(
-                    f"Client {client_id[:8]}... subscribed to {uri_str} (total subscribers: {subscriber_count})"
+                    f"Client {client_id[:8]}... subscribed to {uri_str} "
+                    f"(subscribers: {subscriber_count})"
                 )
-                print(
-                    f"✅ SUBSCRIPTION REGISTERED: Client {client_id[:8]}... subscribed to {uri_str}"
-                )
+                print(f"✅ SUB: Client {client_id[:8]}... subscribed to {uri_str}")
 
                 # Send initial "test" notification to confirm subscription is working
                 try:
-                    # This sends an immediate resource update notification to verify channel works
-                    print(
-                        f"🔄 Sending initial test notification to client {client_id[:8]}..."
-                    )
+                    # Send immediate test notification to verify channel works
+                    print(f"🔄 Test notification to client {client_id[:8]}...")
                     await current_session.send_resource_updated(uri=AnyUrl(uri_str))
-                    print(f"✅ Initial test notification sent successfully")
+                    print("✅ Initial test notification sent successfully")
                 except Exception as e:
                     print(f"❌ Failed to send initial test notification: {str(e)}")
                     self.logger.error(
@@ -888,9 +895,9 @@ class FileMonitorMCPServer:
                         10
                     )  # Check every 10 seconds for better responsiveness
 
-                    # For debugging - periodically confirm the subscription is still active
+                    # Debug: periodically confirm subscription still active
                     self.logger.debug(
-                        f"Subscription {subscription_id} for client {client_id[:8]}... still active"
+                        f"Sub {subscription_id} for client {client_id[:8]}... active"
                     )
             except asyncio.CancelledError:
                 self.logger.info(f"Subscription cancelled: {uri_str}")
@@ -902,7 +909,8 @@ class FileMonitorMCPServer:
                         if client_id in subscription.resource_subscribers:
                             subscription.resource_subscribers.remove(client_id)
                             self.logger.info(
-                                f"Removed client {client_id[:8]}... from subscription {subscription_id}"
+                                f"Removed client {client_id[:8]}... from subscription "
+                                f"{subscription_id}"
                             )
 
                 # Remove client from clients dict
@@ -1039,7 +1047,7 @@ class FileMonitorMCPServer:
             self.subscriptions[subscription.id] = subscription
 
             # Automatically register the creating client as a subscriber
-            # This ensures that the client who creates a subscription receives notifications
+            # so the client receives notifications
             try:
                 if hasattr(self.server, "request_context") and hasattr(
                     self.server.request_context, "session"
@@ -1058,9 +1066,7 @@ class FileMonitorMCPServer:
                     self.logger.info(
                         f"Auto-subscribed client to subscription {subscription.id}"
                     )
-                    print(
-                        f"✅ AUTO-SUBSCRIBED: Tool creator auto-subscribed to {subscription.id}"
-                    )
+                    print(f"✅ Tool creator auto-subscribed to {subscription.id}")
             except Exception as e:
                 # Non-critical error, the tool can still succeed
                 self.logger.warning(f"Could not auto-subscribe tool creator: {str(e)}")
@@ -1154,7 +1160,11 @@ class FileMonitorMCPServer:
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps({"subscriptions": subscriptions_data}, indent=2),
+                    text=json.dumps(
+                        {"subscriptions": subscriptions_data},
+                        indent=2,
+                        cls=DateTimeEncoder,
+                    ),
                 )
             ]
 
@@ -1199,9 +1209,9 @@ class FileMonitorMCPServer:
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
-                        {"error": f".mcpignore file already exists at {mcpignore_path}"}
-                    ),
+                    text=json.dumps({
+                        "error": f".mcpignore file already exists at {mcpignore_path}"
+                    }),
                 )
             ]
 
@@ -1299,9 +1309,9 @@ class FileMonitorMCPServer:
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
-                        {"error": f"Failed to create .mcpignore file: {str(e)}"}
-                    ),
+                    text=json.dumps({
+                        "error": f"Failed to create .mcpignore file: {str(e)}"
+                    }),
                 )
             ]
 
@@ -1312,7 +1322,8 @@ class FileMonitorMCPServer:
         Handle the get_changes tool to retrieve recent changes for a subscription.
 
         Args:
-            input_data: Validated input parameters with subscription ID and optional timestamp
+            input_data: Validated input parameters with subscription ID and optional
+                timestamp
 
         Returns:
             List of TextContent objects with changes or error message
@@ -1331,11 +1342,10 @@ class FileMonitorMCPServer:
                 return [
                     TextContent(
                         type="text",
-                        text=json.dumps(
-                            {
-                                "error": f"Invalid timestamp format: {input_data.since}. Expected ISO format."
-                            }
-                        ),
+                        text=json.dumps({
+                            "error": f"Invalid timestamp format: {input_data.since}. "
+                            f"Expected ISO format."
+                        }),
                     )
                 ]
 
@@ -1345,9 +1355,9 @@ class FileMonitorMCPServer:
                 return [
                     TextContent(
                         type="text",
-                        text=json.dumps(
-                            {"error": f"Subscription not found: {subscription_id}"}
-                        ),
+                        text=json.dumps({
+                            "error": f"Subscription not found: {subscription_id}"
+                        }),
                     )
                 ]
 
@@ -1368,6 +1378,7 @@ class FileMonitorMCPServer:
                                 "changes": changes,
                             },
                             indent=2,
+                            cls=DateTimeEncoder,
                         ),
                     )
                 ]
@@ -1385,6 +1396,7 @@ class FileMonitorMCPServer:
                                 "changes": [change.model_dump() for change in changes],
                             },
                             indent=2,
+                            cls=DateTimeEncoder,
                         ),
                     )
                 ]
@@ -1437,17 +1449,15 @@ class FileMonitorMCPServer:
             entries = []
             for entry in os.scandir(path):
                 entry_type = "file" if entry.is_file() else "directory"
-                entries.append(
-                    {
-                        "name": entry.name,
-                        "path": entry.path,
-                        "type": entry_type,
-                        "size": entry.stat().st_size if entry.is_file() else None,
-                        "modified": datetime.datetime.fromtimestamp(
-                            entry.stat().st_mtime, tz=datetime.timezone.utc
-                        ).isoformat(),
-                    }
-                )
+                entries.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "type": entry_type,
+                    "size": entry.stat().st_size if entry.is_file() else None,
+                    "modified": datetime.datetime.fromtimestamp(
+                        entry.stat().st_mtime, tz=datetime.timezone.utc
+                    ).isoformat(),
+                })
 
             # Sort by name
             entries.sort(key=lambda e: str(e["name"]))
@@ -1492,7 +1502,8 @@ class FileMonitorMCPServer:
                 subscription.resource_subscribers
             )
 
-            return json.dumps(subscription_data, indent=2)
+            # Use the DateTimeEncoder to handle datetime objects
+            return json.dumps(subscription_data, indent=2, cls=DateTimeEncoder)
 
     def _handle_event(self, subscription_id: str, path: str, event_type: str) -> None:
         """
@@ -1507,7 +1518,8 @@ class FileMonitorMCPServer:
             event_type: Type of event (created, modified, deleted)
         """
         self.logger.debug(
-            f"Watchdog detected event: {event_type} at {path} for subscription {subscription_id}"
+            f"Watchdog detected event: {event_type} at {path} for subscription "
+            f"{subscription_id}"
         )
 
         # Store the event for testing purposes in a thread-safe way
@@ -1571,7 +1583,8 @@ class FileMonitorMCPServer:
                 f"Adding {event_type} event for {path} to notification queue"
             )
 
-            # Add to notification queue for real-time updates with a timeout to prevent deadlock
+            # Add to notification queue for real-time updates with a timeout to prevent
+            # deadlock
             try:
                 # Use asyncio.wait_for to enforce a timeout
                 await asyncio.wait_for(
@@ -1581,7 +1594,8 @@ class FileMonitorMCPServer:
                 self.logger.debug(f"Successfully queued {event_type} event")
             except asyncio.TimeoutError:
                 self.logger.error(
-                    f"Timeout while adding to notification queue - queue might be full or blocked"
+                    "Timeout while adding to notification queue - queue might be full "
+                    "or blocked"
                 )
                 # Still record the change even if notification queue is stuck
 
@@ -1618,14 +1632,16 @@ class FileMonitorMCPServer:
                     continue
 
                 self.logger.info(
-                    f"Processing notification: {event_type} event at {path} for subscription {subscription_id}"
+                    f"Processing notification: {event_type} event at {path} for "
+                    f"subscription {subscription_id}"
                 )
 
                 # Add the change to the subscription
                 async with self.subscription_lock:
                     if subscription_id not in self.subscriptions:
                         self.logger.warning(
-                            f"Subscription {subscription_id} not found when processing notification"
+                            f"Subscription {subscription_id} not found when processing "
+                            f"notification"
                         )
                         self.notification_queue.task_done()
                         continue
@@ -1636,7 +1652,7 @@ class FileMonitorMCPServer:
                     # Skip if the change was not added (e.g. filtered by event type)
                     if change is None:
                         self.logger.debug(
-                            f"Change not added to subscription (filtered by event type)"
+                            "Change not added to subscription (filtered by event type)"
                         )
                         self.notification_queue.task_done()
                         continue
@@ -1649,7 +1665,8 @@ class FileMonitorMCPServer:
 
                     if subscriber_count == 0:
                         self.logger.info(
-                            f"No subscribers for subscription {subscription_id}, skipping notifications"
+                            f"No subscribers for subscription {subscription_id}, "
+                            f"skipping notifications"
                         )
                         self.notification_queue.task_done()
                         continue
@@ -1665,14 +1682,17 @@ class FileMonitorMCPServer:
                             try:
                                 # Print clear logging with a distinctive marker
                                 print(
-                                    f"⚡ SENDING NOTIFICATION: {event_type} event for {path} to client {client_id[:8]}..."
+                                    f"⚡ NOTIFICATION: {event_type} event for {path} "
+                                    f"to client {client_id[:8]}..."
                                 )
                                 self.logger.info(
-                                    f"Sending notification to client {client_id[:8]}... for resource subscription://{subscription_id}"
+                                    f"Sending to client {client_id[:8]}... for "
+                                    f"resource subscription://{subscription_id}"
                                 )
 
-                                # Use wait_for to enforce a timeout on sending notifications
-                                # The correct method is send_resource_updated (not send_resource_updated_notification)
+                                # Use wait_for to enforce a timeout on notifications
+                                # The correct method is send_resource_updated
+                                # (not send_resource_updated_notification)
                                 await asyncio.wait_for(
                                     session.send_resource_updated(
                                         uri=AnyUrl(f"subscription://{subscription_id}")
@@ -1682,23 +1702,27 @@ class FileMonitorMCPServer:
 
                                 # Log success with a distinctive marker
                                 print(
-                                    f"✅ NOTIFICATION SENT SUCCESSFULLY to client {client_id[:8]}..."
+                                    f"✅ NOTIFICATION SENT SUCCESSFULLY to client "
+                                    f"{client_id[:8]}..."
                                 )
                                 self.logger.info(
-                                    f"Successfully sent notification to client {client_id[:8]}..."
+                                    f"Successfully sent notification to client "
+                                    f"{client_id[:8]}..."
                                 )
                                 sent_count += 1
                             except Exception as e:
                                 error_msg = str(e)
                                 print(f"❌ NOTIFICATION ERROR: {error_msg}")
                                 self.logger.error(
-                                    f"Error sending notification to client {client_id[:8]}...: {error_msg}"
+                                    f"Error sending to client {client_id[:8]}: "
+                                    f"{error_msg}"
                                 )
                                 error_count += 1
                                 # Keep subscriber for now, might be a temporary issue
                         else:
                             self.logger.warning(
-                                f"Client {client_id[:8]}... has no active session, removing subscriber"
+                                f"Client {client_id[:8]}... has no active session, "
+                                f"removing subscriber"
                             )
                             # Clean up subscriptions without active sessions
                             subscription.resource_subscribers.remove(client_id)

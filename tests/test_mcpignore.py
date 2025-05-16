@@ -84,9 +84,11 @@ async def test_ignore_patterns_respected(server: FileMonitorMCPServer, temp_dir:
 
     # Manually add an event for the normal file
     # The ignored files should not have events added due to the MCPIgnore handler
-    server._changes.setdefault(subscription_id, []).append(
-        {"path": str(normal_file), "event": "created", "timestamp": time.time()}
-    )
+    server._changes.setdefault(subscription_id, []).append({
+        "path": str(normal_file),
+        "event": "created",
+        "timestamp": time.time(),
+    })
 
     # Check for changes
     changes_input_data = GetChangesInput(subscription_id=subscription_id)

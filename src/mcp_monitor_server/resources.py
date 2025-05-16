@@ -39,14 +39,12 @@ class ResourceManager:
         # Add subscription resources
         subscriptions = await self.subscription_manager.list_subscriptions()
         for subscription in subscriptions:
-            resources.append(
-                {
-                    "uri": f"subscription://{subscription.id}",
-                    "name": f"Subscription: {subscription.path}",
-                    "mimeType": "application/json",
-                    "description": f"File change notifications for {subscription.path}",
-                }
-            )
+            resources.append({
+                "uri": f"subscription://{subscription.id}",
+                "name": f"Subscription: {subscription.path}",
+                "mimeType": "application/json",
+                "description": f"File change notifications for {subscription.path}",
+            })
 
         return resources
 
@@ -154,15 +152,13 @@ class ResourceManager:
             entries = []
             for entry in os.scandir(path):
                 entry_type = "file" if entry.is_file() else "directory"
-                entries.append(
-                    {
-                        "name": entry.name,
-                        "path": entry.path,
-                        "type": entry_type,
-                        "size": entry.stat().st_size if entry.is_file() else None,
-                        "modified": entry.stat().st_mtime,
-                    }
-                )
+                entries.append({
+                    "name": entry.name,
+                    "path": entry.path,
+                    "type": entry_type,
+                    "size": entry.stat().st_size if entry.is_file() else None,
+                    "modified": entry.stat().st_mtime,
+                })
 
             # Sort by name
             entries.sort(key=lambda e: e["name"] or "")

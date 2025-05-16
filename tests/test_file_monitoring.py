@@ -23,9 +23,11 @@ async def test_detect_file_creation(
 
     # Manually trigger file event since the watcher might not work in tests
     # This simulates what the file system watcher would do
-    server._changes.setdefault(subscription, []).append(
-        {"path": str(new_file), "event": "created", "timestamp": time.time()}
-    )
+    server._changes.setdefault(subscription, []).append({
+        "path": str(new_file),
+        "event": "created",
+        "timestamp": time.time(),
+    })
 
     # Check for changes
     input_data = GetChangesInput(subscription_id=subscription)
@@ -57,9 +59,11 @@ async def test_detect_file_modification(
 
     # Manually trigger file event since the watcher might not work in tests
     # This simulates what the file system watcher would do
-    server._changes.setdefault(subscription, []).append(
-        {"path": str(test_file), "event": "modified", "timestamp": time.time()}
-    )
+    server._changes.setdefault(subscription, []).append({
+        "path": str(test_file),
+        "event": "modified",
+        "timestamp": time.time(),
+    })
 
     # Check for changes
     input_data = GetChangesInput(subscription_id=subscription)
@@ -95,9 +99,11 @@ async def test_detect_file_deletion(
 
     # Manually trigger file event since the watcher might not work in tests
     # This simulates what the file system watcher would do
-    server._changes.setdefault(subscription, []).append(
-        {"path": str(delete_file), "event": "deleted", "timestamp": time.time()}
-    )
+    server._changes.setdefault(subscription, []).append({
+        "path": str(delete_file),
+        "event": "deleted",
+        "timestamp": time.time(),
+    })
 
     # Check for changes
     input_data = GetChangesInput(subscription_id=subscription)
@@ -134,9 +140,11 @@ async def test_recursive_monitoring(
 
     # Manually trigger file event since the watcher might not work in tests
     # This simulates what the file system watcher would do
-    server._changes.setdefault(subscription, []).append(
-        {"path": str(subdir_file), "event": "created", "timestamp": time.time()}
-    )
+    server._changes.setdefault(subscription, []).append({
+        "path": str(subdir_file),
+        "event": "created",
+        "timestamp": time.time(),
+    })
 
     # Check for changes
     input_data = GetChangesInput(subscription_id=subscription)

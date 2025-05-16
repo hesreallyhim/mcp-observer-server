@@ -77,5 +77,6 @@ def wait_for_file_operation(path: Path, timeout: float = 1.0) -> None:
         time.sleep(0.1)
 
 
-# We're removing the custom event_loop fixture and will use the one provided by pytest-asyncio instead
+# We're removing the custom event_loop fixture and will use the one provided by
+# pytest-asyncio instead
 # To set the scope, we'll update pyproject.toml

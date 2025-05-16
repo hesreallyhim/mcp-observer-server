@@ -14,15 +14,19 @@ def test_cli_help():
     assert "monitor-path" in result.output
     assert "verbose" in result.output
 
+
 def test_cli_defaults():
     """Test that CLI uses reasonable defaults."""
     runner = CliRunner()
     # Just run with --help to avoid actually starting the server
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    
+
     # The default monitor path should be cwd
-    assert "Default: current directory" in result.output or "monitor-path" in result.output
+    assert (
+        "Default: current directory" in result.output or "monitor-path" in result.output
+    )
+
 
 # As patching asyncio.run was causing issues, let's test only the synchronous parts
 # Skip this test entirely for now as it's an integration test

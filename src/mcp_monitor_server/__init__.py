@@ -26,7 +26,7 @@ __version__ = "0.1.0"
 @click.option("-v", "--verbose", count=True, help="Increase logging verbosity")
 def main(monitor_path: Optional[Path] = None, verbose: int = 0):
     """Start the MCP Monitor Server to track file changes and notify clients.
-    
+
     Args:
         monitor_path (Path): The path to monitor for changes. Defaults to the current working directory.
         verbose (int): Verbosity level for logging. Use -v for INFO, -vv for DEBUG.

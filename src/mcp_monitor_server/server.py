@@ -543,7 +543,7 @@ class FileMonitorMCPServer:
         self._changes: dict[str, Any] = {}
         
         # Setup logging
-        self.logger = logging.getLogger("file-monitor-mcp")
+        self.logger = logging.getLogger("mcp-monitor-server")
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

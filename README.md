@@ -244,6 +244,31 @@ The server implementation will use:
 3. Asyncio for non-blocking operations and notification delivery
 4. In-memory storage for subscription management
 
+## System Design
+
+The server implementation follows a carefully designed architecture that separates protocol handling from business logic:
+
+### Lifecycle Management
+
+The lifecycle management isn't passed directly to the Server when instantiating it because the MCP Server architecture follows a different pattern:
+
+1. **Separation of Concerns**: The Server instance (from the MCP library) is focused on protocol handling, while our FileMonitorMCPServer wrapper handles the business logic and resource lifecycle. This separation keeps the MCP protocol handling decoupled from our specific file monitoring functionality.
+
+2. **Different Responsibility Layers**: The MCP Server (self.server) primarily handles protocol-level communication, while our own lifespan context manager manages higher-level application components like observers, notification processors, and resource cleanup.
+
+3. **Composition vs. Inheritance**: The code uses composition (having a Server as a member) rather than inheritance (extending the Server class). This allows us to add our own lifecycle management without modifying the base Server class.
+
+4. **Event Loop Management**: Our lifespan context manager coordinates with asyncio's event loop for proper task management, while the Server itself is more focused on handling requests and responses.
+
+5. **Control Flow Design**: The lifespan is used at the runtime level in `run()`, where it wraps the entire execution to ensure proper initialization before accepting connections and proper cleanup after. The Server instance is used within this context, not the other way around.
+
+Instead of passing the lifespan to the Server directly, the code:
+1. Creates a Server instance as a component of FileMonitorMCPServer
+2. Implements a lifespan context manager in FileMonitorMCPServer
+3. Uses the lifespan at the application level to wrap the Server's run method
+
+This approach allows us to maintain proper lifecycle for all our components while keeping the MCP protocol handling focused on its specific responsibilities.
+
 ## Installation and Usage
 
 ### Setup

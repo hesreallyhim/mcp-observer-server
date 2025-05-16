@@ -104,21 +104,8 @@ class FileChange(BaseModel):
     event: str = Field(description="Event type: created, modified, or deleted")
     timestamp: datetime.datetime = Field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc),
-        description="When the change occurred (UTC timezone)"
+        description="When the change occurred (UTC timezone)",
     )
-
-    def to_dict(self) -> dict:
-        """
-        Convert to dictionary representation for JSON serialization.
-        
-        Returns:
-            Dict with path, event, and ISO-formatted timestamp
-        """
-        return {
-            "path": self.path,
-            "event": self.event,
-            "timestamp": self.timestamp.isoformat()
-        }
 
 
 class Subscription(BaseModel):
@@ -171,23 +158,6 @@ class Subscription(BaseModel):
     )
 
     model_config = ConfigDict(validate_assignment=True)
-
-    def to_dict(self) -> dict:
-        """
-        Convert to dictionary representation for JSON serialization.
-        
-        Returns:
-            Dict with subscription properties (excluding changes and subscribers)
-        """
-        return {
-            "id": self.id,
-            "path": self.path,
-            "recursive": self.recursive,
-            "patterns": self.patterns,
-            "ignore_patterns": self.ignore_patterns,
-            "events": self.events,
-            "created_at": self.created_at.isoformat()
-        }
 
     def add_change(self, path: str, event: str) -> Optional[FileChange]:
         """
@@ -1248,7 +1218,7 @@ class FileMonitorMCPServer:
                     text=json.dumps({
                         "subscription_id": subscription_id,
                         "path": subscription.path,
-                        "changes": [change.to_dict() for change in changes]
+                        "changes": [change.model_dump() for change in changes]
                     }, indent=2)
                 )]
     
@@ -1342,11 +1312,11 @@ class FileMonitorMCPServer:
             subscription = self.subscriptions[subscription_id]
             
             # Convert to dict for JSON serialization
-            subscription_data = subscription.to_dict()
+            subscription_data = subscription.model_dump(exclude={'changes', 'resource_subscribers'})
             
             # Add recent changes
             subscription_data["recent_changes"] = [
-                change.to_dict() for change in subscription.changes[-20:]  # Show last 20 changes
+                change.model_dump() for change in subscription.changes[-20:]  # Show last 20 changes
             ]
             
             # Add subscriber count

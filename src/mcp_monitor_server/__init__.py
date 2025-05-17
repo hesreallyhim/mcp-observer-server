@@ -2,7 +2,6 @@
 MCP Monitor Server - A file system monitoring server using Model Context Protocol
 """
 
-import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Optional
 # from typing import Optional
 import click
 
-from mcp_monitor_server.server import run
+from mcp_monitor_server.server import mcp
 
 __version__ = "0.1.0"
 
@@ -52,8 +51,12 @@ def main(monitor_path: Optional[Path] = None, verbose: int = 0):
     # Run the server
     try:
         # Convert Path object to string if it's a Path
-        path_str = str(monitor_path) if monitor_path else None
-        asyncio.run(run(path_str))
+        # path_str = str(monitor_path) if monitor_path else None
+        # asyncio.run(run(path_str))
+
+        mcp.run(
+            transport="streamable-http",
+        )
     except KeyboardInterrupt:
         logging.info("Server stopped by user")
     except Exception as e:

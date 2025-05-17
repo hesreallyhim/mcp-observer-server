@@ -159,7 +159,10 @@ class FileWatcher:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Error processing event: {e}")
+                import logging
+
+                logger = logging.getLogger("mcp-monitor-server")
+                logger.error(f"Error processing event: {e}")
 
     async def start(self) -> None:
         """Start the file watcher."""

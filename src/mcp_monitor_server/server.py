@@ -76,13 +76,44 @@ async def call_tool_handler(
         subs = watched.get(p)
         if subs and rid in subs:
             subs.remove(rid)
+            sessions_by_request.pop(rid, None)
             if not subs:
                 del watched[p]
-            sessions_by_request.pop(rid, None)
             return [types.TextContent(type="text", text=f"Unsubscribed from {p}")]
         return [types.TextContent(type="text", text=f"Not subscribed to {p}")]
     # Handle unknown tool names
     return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+
+# Resource-level subscribe/unsubscribe handlers for Inspector
+@server.subscribe_resource()
+async def subscribe_resource_handler(uri: AnyUrl) -> None:
+    # Invoked by resources/subscribe
+    if not uri.path:
+        return
+    p = Path(uri.path).resolve()
+    rid = server.request_context.request_id
+    session = server.request_context.session
+    watched.setdefault(p, set()).add(rid)
+    sessions_by_request[rid] = session
+
+@server.unsubscribe_resource()
+async def unsubscribe_resource_handler(uri: AnyUrl) -> None:
+    # Invoked by resources/unsubscribe
+    if not uri.path:
+        return
+    p = Path(uri.path).resolve()
+    rid = server.request_context.request_id
+    subs = watched.get(p)
+    if subs and rid in subs:
+        subs.remove(rid)
+        sessions_by_request.pop(rid, None)
+        if not subs:
+            del watched[p]
+
+@server.list_resource_templates()
+async def list_resource_templates() -> list[types.ResourceTemplate]:
+    # No resource templates supported
+    return []
 
 @server.list_resources()
 async def list_resources() -> list[Resource]:
@@ -147,7 +178,7 @@ async def main():
     observer.schedule(Watcher(loop), path=".", recursive=True)
     observer.start()
 
-    # Advertise tool and resource capabilities
+        # Advertise tool and resource capabilities
     caps = types.ServerCapabilities(
         prompts=None,
         resources=types.ResourcesCapability(subscribe=True, listChanged=False),

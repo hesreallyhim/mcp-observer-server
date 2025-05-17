@@ -32,7 +32,7 @@ server: Server = Server(
 
 @server.list_resources()
 async def list_resources() -> list[Resource]:
-    # Advertise the single watched file
+    # Advertise the file as a resource
     return [Resource(uri=AnyUrl(RESOURCE_URI), name="Watched File", mimeType="text/plain")]
 
 @server.read_resource()
@@ -44,7 +44,6 @@ async def read_resource(uri: AnyUrl) -> str:
 @server.subscribe_resource()
 async def subscribe(uri: AnyUrl) -> None:
     if str(uri) == RESOURCE_URI:
-        # Record the subscribing session
         subscriptions.add(server.request_context.session)
 
 @server.unsubscribe_resource()
@@ -52,14 +51,13 @@ async def unsubscribe(uri: AnyUrl) -> None:
     if str(uri) == RESOURCE_URI:
         subscriptions.discard(server.request_context.session)
 
-# File-change watcher to push notifications
+# File watcher that emits notifications on any change
 class FileWatcher(FileSystemEventHandler):
     def __init__(self, loop: asyncio.AbstractEventLoop):
         super().__init__()
         self.loop = loop
 
     def on_any_event(self, event):
-        # Only notify on changes to our watched file
         if Path(str(event.src_path)).resolve() == FILE_PATH.resolve():
             timestamp = datetime.utcnow().isoformat() + "Z"
             for session in list(subscriptions):
@@ -71,10 +69,10 @@ class FileWatcher(FileSystemEventHandler):
                     method="notifications/resources/updated",
                     params=params
                 )
-                # Schedule the notification to be sent via the session
+                # Schedule notification send
                 self.loop.call_soon_threadsafe(
-                    lambda session=session, notif=notif: asyncio.create_task(
-                        session.send_notification(ServerNotification(root=notif))
+                    lambda sess=session, n=notif: asyncio.create_task(
+                        sess.send_notification(ServerNotification(root=n))
                     )
                 )
 
@@ -94,7 +92,7 @@ async def main():
         instructions=server.instructions,
     )
 
-    # Ensure watched file exists
+    # Ensure file exists
     FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     FILE_PATH.touch(exist_ok=True)
 

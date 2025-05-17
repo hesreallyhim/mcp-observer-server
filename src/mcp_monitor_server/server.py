@@ -139,6 +139,7 @@ class Watcher(FileSystemEventHandler):
                             session.send_notification(types.ServerNotification(root=notif))
                         )
                     )
+
 async def main():
     # Start filesystem observer
     loop = asyncio.get_running_loop()
@@ -146,10 +147,10 @@ async def main():
     observer.schedule(Watcher(loop), path=".", recursive=True)
     observer.start()
 
-    # Advertise only tool capabilities
+    # Advertise tool and resource capabilities
     caps = types.ServerCapabilities(
         prompts=None,
-        resources=None,
+        resources=types.ResourcesCapability(subscribe=True, listChanged=False),
         tools=types.ToolsCapability(listChanged=False),
         logging=None,
         experimental={}

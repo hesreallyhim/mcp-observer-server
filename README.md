@@ -30,6 +30,79 @@ The MCP Monitor Server tracks file and directory changes on your system, allowin
 - **Testing automation**: Run tests when relevant files are modified
 - **AI assistance**: Enable AI tools to respond to file changes automatically
 
+## Current Implementation Design
+
+The server implementation features a streamlined architecture that prioritizes simplicity, reliability, and maintainability.
+
+### Architecture Highlights
+
+1. **Simplified Structure**
+
+   - Focused implementation (~170 lines of code)
+   - Consolidated functionality into a small set of core components
+   - Clean function-based design that leverages the MCP SDK directly
+   - High readability and maintainability
+
+2. **Efficient State Management**
+
+   - Simple dictionary structure maps paths to client sessions
+   - Uses a `watched` dictionary for direct path-to-session mapping
+   - Minimal state tracking with clear data flow
+   - Avoids redundant data structures
+
+3. **MCP Protocol Integration**
+
+   - Direct use of MCP SDK function decorators
+   - Clean resource URI handling
+   - Simplified server initialization with proper capability configuration
+   - Direct notification delivery system
+
+4. **Event Processing**
+
+   - Streamlined Watchdog event handler implementation
+   - Direct event-to-notification path
+   - Thread-safe communication via `call_soon_threadsafe`
+   - Efficient event filtering
+
+5. **Notification System**
+   - Direct use of MCP notification primitives
+   - Reliable delivery with proper error handling
+   - Accurate UTC timestamp handling
+   - Clean URI formatting
+
+### Core Components
+
+1. **Data Structure**
+
+   - Single global dictionary `watched` maps Path objects to sets of ServerSession objects
+   - Each path entry contains the set of sessions subscribed to that path
+
+2. **Tool API**
+
+   - Two essential tools: `subscribe` and `unsubscribe`
+   - Simple path parameter for straightforward subscription management
+   - Clean error handling and path validation
+
+3. **Resource Handling**
+
+   - File URIs directly exposed through resource listing
+   - Path resolution and validation
+   - Text content reading for files
+
+4. **Event Processing**
+
+   - Watcher class extends FileSystemEventHandler
+   - Processes modified events directly
+   - Thread-safe notification dispatching
+   - Path relativity handling for nested paths
+
+5. **Notification Delivery**
+   - ServerNotification creation and sending
+   - Event metadata with timestamps
+   - Clean URI formatting
+
+The implementation achieves a good balance between functionality and simplicity, resulting in a reliable and maintainable codebase.
+
 # File Change Monitoring MCP Server Specification
 
 ## Overview
@@ -237,7 +310,7 @@ This allows fine-grained control of which files trigger notifications.
 
 ## Implementation Notes
 
-The server implementation will use:
+The implementation will use:
 
 1. Python's MCP SDK for protocol handling
 2. Watchdog library for efficient file system monitoring
@@ -263,6 +336,7 @@ The lifecycle management isn't passed directly to the Server when instantiating 
 5. **Control Flow Design**: The lifespan is used at the runtime level in `run()`, where it wraps the entire execution to ensure proper initialization before accepting connections and proper cleanup after. The Server instance is used within this context, not the other way around.
 
 Instead of passing the lifespan to the Server directly, the code:
+
 1. Creates a Server instance as a component of FileMonitorMCPServer
 2. Implements a lifespan context manager in FileMonitorMCPServer
 3. Uses the lifespan at the application level to wrap the Server's run method
@@ -314,6 +388,7 @@ mcp install src/mcp_monitor_server/server.py --name "File Monitor"
 Here's an example of how a client would interact with the server:
 
 1. Subscribe to a directory:
+
    ```
    subscription_id = call_tool("subscribe", {
        "path": "/path/to/project",
@@ -323,6 +398,7 @@ Here's an example of how a client would interact with the server:
    ```
 
 2. Create an .mcpignore file:
+
    ```
    call_tool("create_mcpignore", {
        "path": "/path/to/project",
@@ -331,6 +407,7 @@ Here's an example of how a client would interact with the server:
    ```
 
 3. Get recent changes:
+
    ```
    changes = call_tool("get_changes", {
        "subscription_id": subscription_id
@@ -338,6 +415,7 @@ Here's an example of how a client would interact with the server:
    ```
 
 4. Read file contents:
+
    ```
    file_content = read_resource(f"file:///path/to/project/file.py")
    ```

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Set, Dict
 
@@ -20,8 +20,8 @@ watched: Dict[Path, Set[ServerSession]] = {}
 # Create MCP server
 server: Server = Server(
     name="mcp-watch",
-    version="1.0.0",
-    instructions="Subscribe/unsubscribe to filesystem events via separate tools or resource methods"
+    version="0.1.0",
+    instructions="Subscribe/unsubscribe to filesystem events via separate tools or resource methods",
 )
 
 @server.list_tools()
@@ -120,7 +120,7 @@ class Watcher(FileSystemEventHandler):
 
     def on_modified(self, event):
         ev_path = Path(str(event.src_path)).resolve()
-        ts = datetime.utcnow().isoformat() + "Z"
+        ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for p, subs in watched.items():
             if ev_path == p or (p.is_dir() and ev_path.is_relative_to(p)):
                 for session in list(subs):

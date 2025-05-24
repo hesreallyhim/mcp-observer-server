@@ -42,8 +42,8 @@ format: install-dev
 	$(VENV_PYTHON) -m ruff format src/ tests/
 
 # Run the server
-run: install
-	$(VENV_PYTHON) main.py
+# run: install
+# 	$(VENV_PYTHON) main.py
 
 # Clean artifacts
 clean:
@@ -56,3 +56,6 @@ clean:
 	rm -rf *.egg-info/
 	rm -rf .coverage
 	rm -rf htmlcov/
+
+start: install
+	npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py

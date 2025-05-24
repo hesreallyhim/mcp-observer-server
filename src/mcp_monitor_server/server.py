@@ -12,7 +12,7 @@ from mcp.server.stdio import stdio_server
 from mcp.server.lowlevel import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
-from mcp.types import Resource, Tool, TextContent
+from mcp.types import Resource, Tool, TextContent, Prompt, PromptArgument
 
 # Global state: mapping watched paths -> subscribed ServerSession objects
 watched: Dict[Path, Set[ServerSession]] = {}
@@ -45,7 +45,69 @@ async def list_tools() -> list[Tool]:
                 "required": ["path"]
             }
         ),
+        Tool(
+            name="list_watched",
+            description="List all currently monitored paths and their subscriber counts",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            }
+        ),
     ]
+
+@server.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    return [
+        Prompt(
+            name="file_changes",
+            description="Get a summary of recent file changes in monitored paths",
+            arguments=[
+                PromptArgument(
+                    name="path",
+                    description="Optional specific path to check for changes (default: show all monitored paths)",
+                    required=False
+                )
+            ]
+        )
+    ]
+
+@server.get_prompt()
+async def get_prompt(name: str, arguments: dict | None = None) -> types.GetPromptResult:
+    if name != "file_changes":
+        raise ValueError(f"Unknown prompt: {name}")
+    
+    args = arguments or {}
+    specific_path = args.get("path")
+    
+    if specific_path:
+        p = Path(specific_path).expanduser().resolve()
+        if p in watched:
+            prompt_text = f"You are monitoring file changes for: {p}\n\n"
+            prompt_text += f"This path currently has {len(watched[p])} active subscribers.\n"
+            prompt_text += "Use the subscribe/unsubscribe tools to manage monitoring of this path."
+        else:
+            prompt_text = f"Path {p} is not currently being monitored.\n"
+            prompt_text += "Use the subscribe tool to start monitoring this path for changes."
+    else:
+        if watched:
+            prompt_text = f"Currently monitoring {len(watched)} paths:\n\n"
+            for path, sessions in watched.items():
+                prompt_text += f"- {path} ({len(sessions)} subscribers)\n"
+            prompt_text += "\nUse the subscribe/unsubscribe tools to manage these monitoring subscriptions."
+        else:
+            prompt_text = "No paths are currently being monitored.\n"
+            prompt_text += "Use the subscribe tool to start monitoring file or directory changes."
+    
+    return types.GetPromptResult(
+        description="File monitoring status and management",
+        messages=[
+            types.PromptMessage(
+                role="user",
+                content=types.TextContent(type="text", text=prompt_text)
+            )
+        ]
+    )
 
 @server.call_tool()
 async def call_tool_handler(
@@ -69,6 +131,15 @@ async def call_tool_handler(
                 del watched[p]
             return [TextContent(type="text", text=f"Unsubscribed from {p}")]
         return [TextContent(type="text", text=f"Not subscribed to {p}")]
+    elif name == "list_watched":
+        if not watched:
+            return [TextContent(type="text", text="No paths are currently being monitored")]
+        
+        result_lines = [f"Currently monitoring {len(watched)} paths:"]
+        for path, sessions in watched.items():
+            result_lines.append(f"- {path} ({len(sessions)} subscribers)")
+        
+        return [TextContent(type="text", text="\n".join(result_lines))]
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 @server.subscribe_resource()
@@ -146,7 +217,7 @@ async def main():
     observer.start()
 
     caps = types.ServerCapabilities(
-        prompts=None,
+        prompts=types.PromptsCapability(listChanged=True),
         resources=types.ResourcesCapability(subscribe=True, listChanged=True),
         tools=types.ToolsCapability(listChanged=True),
         logging=None,

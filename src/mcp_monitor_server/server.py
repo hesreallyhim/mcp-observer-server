@@ -54,6 +54,15 @@ async def list_tools() -> list[Tool]:
                 "additionalProperties": False
             }
         ),
+        Tool(
+            name="subscribe_default",
+            description="Subscribe to the default watched.txt file for development",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            }
+        ),
     ]
 
 @server.list_prompts()
@@ -116,14 +125,19 @@ async def call_tool_handler(
 ) -> list[TextContent]:
     args = arguments or {}
     path_str = args.get("path")
-    if not path_str:
-        return [TextContent(type="text", text="Error: 'path' argument is required")]
-    p = Path(path_str).expanduser().resolve()
     session = server.request_context.session
+    
+    if not path_str and name not in ["list_watched", "subscribe_default"]:
+        return [TextContent(type="text", text="Error: 'path' argument is required")]
+    
     if name == "subscribe":
+        assert path_str is not None, "path_str should not be None for subscribe tool"
+        p = Path(path_str).expanduser().resolve()
         watched.setdefault(p, set()).add(session)
         return [TextContent(type="text", text=f"Subscribed to {p}")]
     elif name == "unsubscribe":
+        assert path_str is not None, "path_str should not be None for unsubscribe tool"
+        p = Path(path_str).expanduser().resolve()
         subs = watched.get(p)
         if subs and session in subs:
             subs.remove(session)
@@ -140,6 +154,10 @@ async def call_tool_handler(
             result_lines.append(f"- {path} ({len(sessions)} subscribers)")
         
         return [TextContent(type="text", text="\n".join(result_lines))]
+    elif name == "subscribe_default":
+        default_file = Path("src/mcp_monitor_server/watched.txt").expanduser().resolve()
+        watched.setdefault(default_file, set()).add(session)
+        return [TextContent(type="text", text=f"Subscribed to default file: {default_file}")]
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 @server.subscribe_resource()
@@ -164,10 +182,23 @@ async def unsubscribe_resource_handler(uri: AnyUrl) -> None:
 
 @server.list_resources()
 async def list_resources() -> list[Resource]:
-    return [
+    # Default development resource
+    default_file = Path("src/mcp_monitor_server/watched.txt")
+    resources = [
+        Resource(
+            uri=AnyUrl(f"file://{default_file.resolve()}"), 
+            name="watched.txt (dev default)", 
+            mimeType="text/plain"
+        )
+    ]
+    
+    # Add all currently watched paths
+    resources.extend([
         Resource(uri=AnyUrl(f"file://{p}"), name=p.name or str(p), mimeType="text/plain")
         for p in watched
-    ]
+    ])
+    
+    return resources
 
 @server.list_resource_templates()
 async def list_resource_templates() -> list[types.ResourceTemplate]:

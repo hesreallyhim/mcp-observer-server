@@ -57,5 +57,5 @@ clean:
 	rm -rf .coverage
 	rm -rf htmlcov/
 
-start: install
+start:
 	npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py

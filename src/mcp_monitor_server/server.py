@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Set, Dict
+from typing import Awaitable, Iterable, Set, Dict, Union
 
 from pydantic import AnyUrl
 from watchdog.observers import Observer
@@ -12,10 +12,33 @@ from mcp.server.stdio import stdio_server
 from mcp.server.lowlevel import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
-from mcp.types import Resource, Tool, TextContent, Prompt, PromptArgument
+from mcp.types import Resource, Tool, TextContent, Prompt, PromptArgument, ResourceContents
 
 # Global state: mapping watched paths -> subscribed ServerSession objects
 watched: Dict[Path, Set[ServerSession]] = {}
+
+async def send_resources_list_changed_notification():
+    """Send notification that the resource list has changed."""
+    # Get all sessions that might be interested in resource list changes
+    all_sessions = set()
+    for sessions in watched.values():
+        all_sessions.update(sessions)
+    
+    if not all_sessions:
+        return
+    
+    # Create the notification
+    notification = types.ResourceListChangedNotification(
+        method="notifications/resources/list_changed"
+    )
+    
+    # Send to all sessions
+    for session in all_sessions:
+        try:
+            await session.send_notification(types.ServerNotification(root=notification))
+        except Exception:
+            # Ignore failed notifications to avoid breaking the operation
+            pass
 
 # Create MCP server
 server: Server = Server(
@@ -121,7 +144,7 @@ async def get_prompt(name: str, arguments: dict | None = None) -> types.GetPromp
 @server.call_tool()
 async def call_tool_handler(
     name: str,
-    arguments: Dict[str, str] | None
+    arguments: Dict[str, str] | None,
 ) -> list[TextContent]:
     args = arguments or {}
     path_str = args.get("path")
@@ -133,7 +156,13 @@ async def call_tool_handler(
     if name == "subscribe":
         assert path_str is not None, "path_str should not be None for subscribe tool"
         p = Path(path_str).expanduser().resolve()
+        is_new_path = p not in watched
         watched.setdefault(p, set()).add(session)
+        
+        # Send notification if this is a new path being watched
+        if is_new_path:
+            asyncio.create_task(send_resources_list_changed_notification())
+        
         return [TextContent(type="text", text=f"Subscribed to {p}")]
     elif name == "unsubscribe":
         assert path_str is not None, "path_str should not be None for unsubscribe tool"
@@ -156,7 +185,13 @@ async def call_tool_handler(
         return [TextContent(type="text", text="\n".join(result_lines))]
     elif name == "subscribe_default":
         default_file = Path("src/mcp_monitor_server/watched.txt").expanduser().resolve()
+        is_new_path = default_file not in watched
         watched.setdefault(default_file, set()).add(session)
+        
+        # Send notification if this is a new path being watched
+        if is_new_path:
+            asyncio.create_task(send_resources_list_changed_notification())
+        
         return [TextContent(type="text", text=f"Subscribed to default file: {default_file}")]
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -166,7 +201,12 @@ async def subscribe_resource_handler(uri: AnyUrl) -> None:
         return
     p = Path(uri.path).resolve()
     session = server.request_context.session
+    is_new_path = p not in watched
     watched.setdefault(p, set()).add(session)
+    
+    # Send notification if this is a new path being watched
+    if is_new_path:
+        asyncio.create_task(send_resources_list_changed_notification())
 
 @server.unsubscribe_resource()
 async def unsubscribe_resource_handler(uri: AnyUrl) -> None:
@@ -204,16 +244,37 @@ async def list_resources() -> list[Resource]:
 async def list_resource_templates() -> list[types.ResourceTemplate]:
     return []
 
-@server.read_resource()
-async def read_resource(uri: AnyUrl) -> str:
+@server.read_resource() # type: ignore
+async def read_resource(uri: AnyUrl):
     if not uri.path:
         raise Exception("Invalid resource URI")
-    p = Path(uri.path)
+    p = Path(uri.path).resolve()
     if not p.exists():
         raise Exception("Resource not found")
+    
+    # Check if current session is subscribed to this path
+    session = server.request_context.session
+    is_subscribed = p in watched and session in watched[p]
+    
     if p.is_dir():
-        return "\n".join(child.name for child in p.iterdir())
-    return p.read_text()
+        content_text = "\n".join(child.name for child in p.iterdir())
+    else:
+        content_text = p.read_text()
+    
+    # Add subscription metadata as header
+    # metadata_header = f"# Subscription Status: {'✓ Subscribed' if is_subscribed else '✗ Not subscribed'}\n# Path: {p}\n\n"
+    # full_content = metadata_header + content_text
+    
+    resource_content = ResourceContents.model_validate({
+        "uri": uri,
+        # "mimeType": "text/plain",
+        "content": content_text,
+        "_meta": {
+            "subscribed": is_subscribed
+        }
+    })
+    
+    return [resource_content]
 
 class Watcher(FileSystemEventHandler):
     def __init__(self, loop: asyncio.AbstractEventLoop):

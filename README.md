@@ -1,6 +1,6 @@
-# mcp-monitor-server
+# mcp-observer-server
 
-`mcp-monitor-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a bridge between your local file system and AI assistants like Claude, enabling them to respond to file changes automatically.
+`mcp-observer-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a bridge between your local file system and AI assistants like ~~Claude~~ Inspector, enabling them to respond to file changes automatically.
 
 > **NOTE:** This is a demo/POC of a file monitoring MCP server that I'm working on. I'm seeing a lot of questions/comments/Issues/Discussions about this kind of thing, so I wanted to post this minimal implementation to share my approach.
 
@@ -8,7 +8,7 @@
 
 The MCP protocol defines the notion of a resource subscription, wherein a client can request to be notified of any changes to a resource, and the server can choose to send notifications. Here is the flow diagram:
 
-![Resource Subscription Flow Diagram](./MCP%20Resource%20Subscription%20Flow%20Diagram.png)
+![Resource Subscription Flow Diagram](./assets/MCP%20Resource%20Subscription%20Flow%20Diagram.png)
 
 The protocol says the client should then send a read request back to the server to read the changes. (All of this is optional, by the way). But, I find this a bit cumbersome, and involves an extra trip, and I'd rather have my resource-update notification describe the change as well. Fortunately, the SDK offers a `meta`/`_meta` field and you can pretty much send whatever you want. So I might want to send the number of lines changed, a diff of the changes, who knows what. I haven't implemented that in this demo, right now I'm just sending the timestamp. (I basically ripped everything out from the server except the minimum POC.)
 
@@ -18,11 +18,28 @@ The protocol says the client should then send a read request back to the server 
 
 1. Clone the repository.
 2. Install the dependencies using `uv` (or, some other way I suppose).
-3. Run the server using `make start` (uses `uv`) or run `npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py`.
+3. Run the server using `make start` (uses `uv`) or run `npx @modelcontextprotocol/inspector uv run src/mcp_observer_server/server.py`.
 4. Open the Inspector client and connect using stdio, no configuration needed.
 5. Use the `subscribe` tool to monitor a directory or file, (alternatively, you can run "List Resources", click a resource, and then click "Subscribe" button to subscribe to it).
-6. By default, the server will monitor a file called `watched.txt` in `src/mcp_monitor_server/watched.txt` (the file is .gitignore, so you have to create it), but you can subscribe to other files as well.
+6. By default, the server will expose a file called `watched.txt` in `src/mcp_observer_server/watched.txt` (the file is .gitignored, so you have to create it), but you can subscribe to other files as well. You can subscribe this file with the `subscribe_default` tool.
 7. Modify the `watched.txt` file (or whatever file you subscribed to), and you should see a server notification appear in the bottom-right panel of the Inspector. This is the POC established.
+
+## DEMO VISUALIZATION
+
+1.  Start the server and connect with Inspector:
+    ![Start Server and Connect](./assets/01-start-server-and-connect.png)
+2.  List the default resources:
+    ![List Resources](./assets/02%20-%20list-default-resources.png
+3.  List the tools:
+    ![List Tools](./assets/03%20-%20list-tools.png)
+4.  Subscribe to the default file:
+    ![Subscribe to Default File](./assets/04%20-%20invoke-subscribe-default.png
+5.  Modify the file:
+    ![Modify the File](./assets/05%20-%20editing-watched-file.png)
+6.  See the notification appear:
+    ![See Notification](./assets/06%20-%20server-notification-received.png)
+
+🎉
 
 ## Server Description
 
@@ -374,8 +391,8 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mcp-monitor-server.git
-cd mcp-monitor-server
+git clone https://github.com/hesreallyhim/mcp-observer-server.git
+cd mcp-observer-server
 
 # Install uv if you don't have it already
 curl -sSf https://astral.sh/uv/install.sh | bash

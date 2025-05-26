@@ -1,5 +1,5 @@
 [project]
-name = "mcp-monitor-server"
+name = "mcp-observer-server"
 version = "0.1.0"
 description = "An MCP server that monitors system events, such as file changes, and sends notifications to an MCP client"
 readme = "README.md"
@@ -41,7 +41,7 @@ line-ending = "auto"
 skip-magic-trailing-comma = false
 
 [tool.ruff.lint.isort]
-known-first-party = ["mcp_monitor_server"]
+known-first-party = ["mcp_observer_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

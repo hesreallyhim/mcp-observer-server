@@ -205,7 +205,9 @@ async def call_tool_handler(
 
         return [TextContent(type="text", text="\n".join(result_lines))]
     elif name == "subscribe_default":
-        default_file = Path("src/mcp_monitor_server/watched.txt").expanduser().resolve()
+        default_file = (
+            Path("src/mcp_observer_server/watched.txt").expanduser().resolve()
+        )
         is_new_path = default_file not in watched
         watched.setdefault(default_file, set()).add(session)
 
@@ -249,7 +251,7 @@ async def unsubscribe_resource_handler(uri: AnyUrl) -> None:
 @server.list_resources()
 async def list_resources() -> list[Resource]:
     # Default development resource
-    default_file = Path("src/mcp_monitor_server/watched.txt")
+    default_file = Path("src/mcp_observer_server/watched.txt")
     resources = [
         Resource(
             uri=AnyUrl(f"file://{default_file.resolve()}"),

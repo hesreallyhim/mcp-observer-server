@@ -272,7 +272,7 @@ cli = [
 ]
 
 [[package]]
-name = "mcp-monitor-server"
+name = "mcp-observer-server"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

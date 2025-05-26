@@ -23,11 +23,11 @@ test: install-dev
 
 # Run tests with coverage
 test-cov: install-dev
-	$(VENV_PYTHON) -m pytest --cov=mcp_monitor_server tests/ --cov-report=term
+	$(VENV_PYTHON) -m pytest --cov=mcp_observer_server tests/ --cov-report=term
 
 # Generate coverage HTML report
 coverage-html: test-cov
-	$(VENV_PYTHON) -m pytest --cov=mcp_monitor_server tests/ --cov-report=html
+	$(VENV_PYTHON) -m pytest --cov=mcp_observer_server tests/ --cov-report=html
 
 # Run linting using ruff
 lint: install-dev
@@ -49,7 +49,7 @@ format: install-dev
 clean:
 	rm -rf .venv/
 	rm -rf __pycache__/
-	rm -rf src/mcp_monitor_server/__pycache__/
+	rm -rf src/mcp_observer_server/__pycache__/
 	rm -rf tests/__pycache__/
 	rm -rf build/
 	rm -rf dist/
@@ -58,4 +58,4 @@ clean:
 	rm -rf htmlcov/
 
 start:
-	npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py
+	npx @modelcontextprotocol/inspector uv run src/mcp_observer_server/server.py

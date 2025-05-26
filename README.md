@@ -1,6 +1,6 @@
 # mcp-observer-server
 
-`mcp-observer-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a bridge between your local file system and AI assistants like ~~Claude~~ Inspector, enabling them to respond to file changes automatically.
+`mcp-observer-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a (more bi-directional) bridge between your local file system and AI assistants like ~~Claude~~ Inspector, enabling them to respond to file changes automatically.
 
 > **NOTE:** This is a demo/POC of a file monitoring MCP server that I'm working on. I'm seeing a lot of questions/comments/Issues/Discussions about this kind of thing, so I wanted to post this minimal implementation to share my approach.
 
@@ -10,7 +10,7 @@ The MCP protocol defines the notion of a resource subscription, wherein a client
 
 ![Resource Subscription Flow Diagram](./assets/MCP%20Resource%20Subscription%20Flow%20Diagram.png)
 
-The protocol says the client should then send a read request back to the server to read the changes. (All of this is optional, by the way). But, I find this a bit cumbersome, and involves an extra trip, and I'd rather have my resource-update notification describe the change as well. Fortunately, the SDK offers a `meta`/`_meta` field and you can pretty much send whatever you want. So I might want to send the number of lines changed, a diff of the changes, who knows what. I haven't implemented that in this demo, right now I'm just sending the timestamp. (I basically ripped everything out from the server except the minimum POC.)
+The protocol says the client should then send a read request back to the server to read the changes. (All of this is optional, by the way). But, I find this a bit cumbersome, and involves an extra trip, and I'd rather have my resource-update notification describe the change as well. Fortunately, the SDK offers a `meta`/`_meta` field and you can pretty much send whatever you want. So I might want to send the number of lines changed, a diff of the changes, who knows what. I haven't implemented that in this demo, right now I'm just sending the timestamp. (I basically ripped everything out from the server except the minimum POC.) Also, it's just running on stdio transport, nothing fancy.
 
 > **NOTE!!!** I haven't tested this with any "real" MCP clients yet - my understanding is that very view clients actually support resource subscriptions, since it's optional anyway. However, fortunately **Inspector** is a very good client, and you can use that to test this server.
 
@@ -27,13 +27,13 @@ The protocol says the client should then send a read request back to the server 
 ## DEMO VISUALIZATION
 
 1.  Start the server and connect with Inspector:
-    ![Start Server and Connect](./assets/01-start-server-and-connect.png)
+    ![Start Server and Connect](./assets/01%20-%20pre-init.png)
 2.  List the default resources:
-    ![List Resources](./assets/02%20-%20list-default-resources.png
+    ![List Resources](./assets/02%20-%20list-default-resources.png)
 3.  List the tools:
     ![List Tools](./assets/03%20-%20list-tools.png)
 4.  Subscribe to the default file:
-    ![Subscribe to Default File](./assets/04%20-%20invoke-subscribe-default.png
+    ![Subscribe to Default File](./assets/04%20-%20invoke-subscribe-default.png)
 5.  Modify the file:
     ![Modify the File](./assets/05%20-%20editing-watched-file.png)
 6.  See the notification appear:
@@ -43,7 +43,7 @@ The protocol says the client should then send a read request back to the server 
 
 ## Server Description
 
-The MCP Monitor Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved (current demo handles modification event). This server implements the full Model Context Protocol specification, providing:
+The MCP Observer Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved (current demo handles modification event). This server implements the full Model Context Protocol specification, providing:
 
 - **Real-time file monitoring**: Using the Watchdog library for efficient file system observation
 - **Subscription management**: Create, list, and cancel monitoring subscriptions for any path

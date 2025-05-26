@@ -4,31 +4,32 @@
 
 ## Server Description
 
-The MCP Monitor Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved. This server implements the full Model Context Protocol specification, providing:
+The MCP Monitor Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved (current demo handles modification event). This server implements the full Model Context Protocol specification, providing:
 
 - **Real-time file monitoring**: Using the Watchdog library for efficient file system observation
 - **Subscription management**: Create, list, and cancel monitoring subscriptions for any path
-- **Change history**: Maintains a log of recent changes for each subscription
+- **Change history**: Maintains a log of recent changes for each subscription (omitted in demo)
 - **File and directory access**: Read file contents and directory listings through MCP resources
 - **Stateless design**: Clients control what happens in response to file changes
 
 ### Key Features
 
 - Subscribe to changes in specific files, directories, or entire repositories
-- Filter events by file patterns or event types
-- Query recent changes to see what files were affected
+- Filter events by file patterns or event types (omitted in demo)
+- Query recent changes to see what files were affected (omitted in demo)
 - Access file contents via resource endpoints
 - Lightweight and efficient implementation with minimal dependencies
-- Simple integration with any MCP-compatible client
+- Simple integration with any MCP-compatible client (...that support resource subscriptions)
 
 ### Practical Applications
 
-- **Automated documentation updates**: Keep documentation in sync with code changes
-- **Live reloading**: Trigger rebuilds or restarts when source files change
-- **Collaborative editing**: Track changes made by other editors or team members
-- **Content synchronization**: Mirror file system changes to remote systems
-- **Testing automation**: Run tests when relevant files are modified
-- **AI assistance**: Enable AI tools to respond to file changes automatically
+The main pain point I am trying to solve is that unless Claude Code, e.g., touches a file and writes the change to it itself, it has no idea what is going on in your repo/project. (You know those notifications - "File changeed since last read"?) Having a client or coding assistant that is actually monitoring what you're doing in your project and you don't have to delegate every task to Claude just so that it knows that it happens, seems tremendously useful to me. Some practical applications include:
+
+- **Automated documentation updates**: Keep documentation in sync with code changes - you update some code, Claude is notified of the change, and it pro-actively checks or updates the doc-strings, etc.
+- **Live code reviews**: Get real-time feedback on code changes as you work, catching spelling errors, type errors, etc., giving advice, true pair programming.
+- **Testing automation**: Run tests when relevant files are modified.
+- **AI assistance**: Enable AI tools to respond to file changes automatically.
+- **Git commit automation**: Do you forget to commit frequently enough? Claude can watch your changes and suggest (or perform) commit actions more frequently.
 
 ## Current Implementation Design
 

@@ -21,7 +21,7 @@ The protocol says the client should then send a read request back to the server 
 3. Run the server using `make start` (uses `uv`) or run `npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py`.
 4. Open the Inspector client and connect using stdio, no configuration needed.
 5. Use the `subscribe` tool to monitor a directory or file, (alternatively, you can run "List Resources", click a resource, and then click "Subscribe" button to subscribe to it).
-6. By default, the server will monitor a file called `watched.txt` in `src/mcp_monitor_server/watched.txt`, but you can subscribe to other files.
+6. By default, the server will monitor a file called `watched.txt` in `src/mcp_monitor_server/watched.txt` (the file is .gitignore, so you have to create it), but you can subscribe to other files as well.
 7. Modify the `watched.txt` file (or whatever file you subscribed to), and you should see a server notification appear in the bottom-right panel of the Inspector. This is the POC established.
 
 ## Server Description

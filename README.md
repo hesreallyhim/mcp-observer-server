@@ -2,6 +2,28 @@
 
 `mcp-monitor-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a bridge between your local file system and AI assistants like Claude, enabling them to respond to file changes automatically.
 
+> **NOTE:** This is a demo/POC of a file monitoring MCP server that I'm working on. I'm seeing a lot of questions/comments/Issues/Discussions about this kind of thing, so I wanted to post this minimal implementation to share my approach.
+
+## Context
+
+The MCP protocol defines the notion of a resource subscription, wherein a client can request to be notified of any changes to a resource, and the server can choose to send notifications. Here is the flow diagram:
+
+![Resource Subscription Flow Diagram](./MCP%20Resource%20Subscription%20Flow%20Diagram.png)
+
+The protocol says the client should then send a read request back to the server to read the changes. (All of this is optional, by the way). But, I find this a bit cumbersome, and involves an extra trip, and I'd rather have my resource-update notification describe the change as well. Fortunately, the SDK offers a `meta`/`_meta` field and you can pretty much send whatever you want. So I might want to send the number of lines changed, a diff of the changes, who knows what. I haven't implemented that in this demo, right now I'm just sending the timestamp. (I basically ripped everything out from the server except the minimum POC.)
+
+> **NOTE!!!** I haven't tested this with any "real" MCP clients yet - my understanding is that very view clients actually support resource subscriptions, since it's optional anyway. However, fortunately **Inspector** is a very good client, and you can use that to test this server.
+
+**DEMO INSTRUCTIONS:**
+
+1. Clone the repository.
+2. Install the dependencies using `uv` (or, some other way I suppose).
+3. Run the server using `make start` (uses `uv`) or run `npx @modelcontextprotocol/inspector uv run src/mcp_monitor_server/server.py`.
+4. Open the Inspector client and connect using stdio, no configuration needed.
+5. Use the `subscribe` tool to monitor a directory or file, (alternatively, you can run "List Resources", click a resource, and then click "Subscribe" button to subscribe to it).
+6. By default, the server will monitor a file called `watched.txt` in `src/mcp_monitor_server/watched.txt`, but you can subscribe to other files.
+7. Modify the `watched.txt` file (or whatever file you subscribed to), and you should see a server notification appear in the bottom-right panel of the Inspector. This is the POC established.
+
 ## Server Description
 
 The MCP Monitor Server tracks file and directory changes on your system, allowing MCP clients to subscribe to these events and take action when files are created, modified, deleted, or moved (current demo handles modification event). This server implements the full Model Context Protocol specification, providing:

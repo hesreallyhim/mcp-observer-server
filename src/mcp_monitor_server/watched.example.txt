@@ -1,0 +1,1 @@
+Copy this file to `./watched.txt` and this will automatically expose that file as a resource to subscribe to for changes.

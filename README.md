@@ -1,5 +1,9 @@
 # mcp-observer-server
 
+<a href="https://glama.ai/mcp/servers/@hesreallyhim/mcp-observer-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@hesreallyhim/mcp-observer-server/badge" />
+</a>
+
 `mcp-observer-server` is an MCP (Model Context Protocol) server that monitors file system events and provides real-time notifications to MCP clients. It acts as a (more bi-directional) bridge between your local file system and AI assistants like ~~Claude~~ Inspector, enabling them to respond to file changes automatically.
 
 > **NOTE:** This is a demo/POC of a file monitoring MCP server that I'm working on. I'm seeing a lot of questions/comments/Issues/Discussions about this kind of thing, so I wanted to post this minimal implementation to share my approach.
